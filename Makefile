@@ -42,7 +42,7 @@ docker-build:
 # Run the application
 run:
 	@echo "Starting services..."
-	docker-compose up
+	docker-compose up -d
 
 # Run in detached mode
 run-detached:

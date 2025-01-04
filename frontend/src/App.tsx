@@ -52,7 +52,7 @@ function App() {
   const [progress, setProgress] = useState(100);
   const [lastUpdateTime, setLastUpdateTime] = useState<Date | null>(null);
   const [timePickerValue, setTimePickerValue] = useState<Dayjs | undefined>(
-    alarmTime?.time ? dayjs(alarmTime.time, 'HH:mm') : undefined
+    alarmTime?.time ? dayjs(alarmTime.time, 'HH:mm') : dayjs('10:30', 'HH:mm')
   );
   const [collapsed, setCollapsed] = useState(false);
 
@@ -172,7 +172,7 @@ function App() {
             <Card title="Device Status">
               {deviceStatus ? (
                 <Space direction="vertical" style={{ width: '100%' }}>
-                  <Text>Last Seen: {new Date(deviceStatus.last_seen).toLocaleString()}</Text>
+                  <Text>Last Seen: {deviceStatus.last_seen ? new Date(deviceStatus.last_seen).toLocaleString() : "Never connected"}</Text>
                   <Progress
                     percent={progress}
                     status={isUpdateOverdue ? 'error' : 'normal'}
@@ -181,8 +181,8 @@ function App() {
                   />
                   {deviceStatus.error_code && (
                     <Alert
-                      type={deviceStatus.error_code === "NO ERROR" ? "success" : "error"}
-                      content={deviceStatus.error_code}
+                      type={deviceStatus.error_code === "NO_ERROR" ? "success" : "error"}
+                      content={deviceStatus.error_code === "NO_ERROR" ? "DEVICE OPERATES CORRECTLY" : deviceStatus.error_code}
                       icon={<IconExclamationCircle />}
                     />
                   )}

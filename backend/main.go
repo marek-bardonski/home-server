@@ -219,7 +219,19 @@ func getAlarmTime(c echo.Context) error {
 	err := db.QueryRow("SELECT time, armed FROM alarm_time ORDER BY id DESC LIMIT 1").
 		Scan(&alarmTime.Time, &alarmTime.Armed)
 
-	if err != nil && err != sql.ErrNoRows {
+	if err == sql.ErrNoRows {
+		// Set default alarm time to 10:30
+		alarmTime = AlarmTime{
+			Time:  "10:30",
+			Armed: true,
+		}
+		// Save the default time to database
+		_, err := db.Exec("INSERT INTO alarm_time (time, armed) VALUES ($1, $2)",
+			alarmTime.Time, alarmTime.Armed)
+		if err != nil {
+			log.Printf("Failed to save default alarm time: %v", err)
+		}
+	} else if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
