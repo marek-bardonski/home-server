@@ -2,16 +2,15 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/lib/pq"
-	"github.com/rs/cors"
 )
 
 type Device struct {
@@ -41,29 +40,39 @@ func main() {
 	initDB()
 	createTables()
 
-	r := mux.NewRouter()
+	e := echo.New()
 
-	// Frontend endpoints
-	r.HandleFunc("/api/device/status", getDeviceStatus).Methods("GET")
-	r.HandleFunc("/api/alarm", getAlarmTime).Methods("GET")
-	r.HandleFunc("/api/alarm", setAlarmTime).Methods("POST")
-	r.HandleFunc("/api/alarm/arm", setAlarmArmed).Methods("POST")
-	r.HandleFunc("/api/sensor-data", getSensorData).Methods("GET")
+	// Middleware
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+	e.Use(middleware.CORS())
 
-	// Arduino endpoint
-	r.HandleFunc("/api/device/update", handleDeviceUpdate).Methods("POST")
+	// API routes
+	api := e.Group("/api")
+	api.GET("/device/status", getDeviceStatus)
+	api.GET("/alarm", getAlarmTime)
+	api.POST("/alarm", setAlarmTime)
+	api.GET("/sensor-data", getSensorData)
+	api.POST("/device/update", handleDeviceUpdate)
 
-	// Use CORS middleware
-	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
-		AllowCredentials: true,
+	// Serve static files
+	e.Static("/static", "static/static")
+	
+	// Serve other static files from the root of the static directory
+	e.File("/favicon.ico", "static/favicon.ico")
+	e.File("/logo192.png", "static/logo192.png")
+	e.File("/logo512.png", "static/logo512.png")
+	e.File("/manifest.json", "static/manifest.json")
+	e.File("/robots.txt", "static/robots.txt")
+	
+	// Handle SPA routing - serve index.html for any unmatched routes
+	e.GET("/*", func(c echo.Context) error {
+		return c.File("static/index.html")
 	})
 
 	port := ":8080"
 	log.Printf("Server starting on port %s", port)
-	log.Fatal(http.ListenAndServe(port, c.Handler(r)))
+	log.Fatal(e.Start(port))
 }
 
 func initDB() {
@@ -118,7 +127,7 @@ func createTables() {
 	}
 }
 
-func getDeviceStatus(w http.ResponseWriter, r *http.Request) {
+func getDeviceStatus(c echo.Context) error {
 	var device Device
 	err := db.QueryRow(`
 		SELECT id, last_seen, error_code, co2_level, temperature, alarm_active, alarm_active_time 
@@ -128,11 +137,10 @@ func getDeviceStatus(w http.ResponseWriter, r *http.Request) {
 		&device.Temperature, &device.AlarmActive, &device.AlarmActiveTime)
 
 	if err != nil && err != sql.ErrNoRows {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	json.NewEncoder(w).Encode(device)
+	return c.JSON(http.StatusOK, device)
 }
 
 type DeviceUpdate struct {
@@ -143,18 +151,16 @@ type DeviceUpdate struct {
 	AlarmActiveTime int64   `json:"alarm_active_time"`
 }
 
-func handleDeviceUpdate(w http.ResponseWriter, r *http.Request) {
+func handleDeviceUpdate(c echo.Context) error {
 	var update DeviceUpdate
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	if err := c.Bind(&update); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
 	// Start a transaction
 	tx, err := db.Begin()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	defer tx.Rollback()
 
@@ -166,8 +172,7 @@ func handleDeviceUpdate(w http.ResponseWriter, r *http.Request) {
 	`, time.Now(), update.ErrorCode, update.CO2Level, update.Temperature,
 		update.AlarmActive, update.AlarmActiveTime)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
 	// Insert sensor data
@@ -176,13 +181,11 @@ func handleDeviceUpdate(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1, $2, $3)
 	`, time.Now(), update.CO2Level, update.Temperature)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
 	if err = tx.Commit(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
 	// Return current alarm configuration
@@ -190,63 +193,40 @@ func handleDeviceUpdate(w http.ResponseWriter, r *http.Request) {
 	err = db.QueryRow("SELECT time, armed FROM alarm_time ORDER BY id DESC LIMIT 1").
 		Scan(&alarmTime.Time, &alarmTime.Armed)
 	if err != nil && err != sql.ErrNoRows {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	json.NewEncoder(w).Encode(alarmTime)
+	return c.JSON(http.StatusOK, alarmTime)
 }
 
-func getAlarmTime(w http.ResponseWriter, r *http.Request) {
+func getAlarmTime(c echo.Context) error {
 	var alarmTime AlarmTime
 	err := db.QueryRow("SELECT time, armed FROM alarm_time ORDER BY id DESC LIMIT 1").
 		Scan(&alarmTime.Time, &alarmTime.Armed)
 
 	if err != nil && err != sql.ErrNoRows {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	json.NewEncoder(w).Encode(alarmTime)
+	return c.JSON(http.StatusOK, alarmTime)
 }
 
-func setAlarmTime(w http.ResponseWriter, r *http.Request) {
+func setAlarmTime(c echo.Context) error {
 	var alarmTime AlarmTime
-	if err := json.NewDecoder(r.Body).Decode(&alarmTime); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	if err := c.Bind(&alarmTime); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
 	_, err := db.Exec("INSERT INTO alarm_time (time, armed) VALUES ($1, $2)",
 		alarmTime.Time, true)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	w.WriteHeader(http.StatusCreated)
+	return c.NoContent(http.StatusCreated)
 }
 
-func setAlarmArmed(w http.ResponseWriter, r *http.Request) {
-	var armed struct {
-		Armed bool `json:"armed"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&armed); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	_, err := db.Exec("UPDATE alarm_time SET armed = $1 WHERE id = (SELECT id FROM alarm_time ORDER BY id DESC LIMIT 1)",
-		armed.Armed)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
-func getSensorData(w http.ResponseWriter, r *http.Request) {
+func getSensorData(c echo.Context) error {
 	// Get sensor data for the last 24 hours
 	rows, err := db.Query(`
 		SELECT timestamp, co2_level, temperature 
@@ -255,8 +235,7 @@ func getSensorData(w http.ResponseWriter, r *http.Request) {
 		ORDER BY timestamp ASC
 	`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	defer rows.Close()
 
@@ -264,11 +243,10 @@ func getSensorData(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var d SensorData
 		if err := rows.Scan(&d.Timestamp, &d.CO2Level, &d.Temperature); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 		data = append(data, d)
 	}
 
-	json.NewEncoder(w).Encode(data)
+	return c.JSON(http.StatusOK, data)
 }

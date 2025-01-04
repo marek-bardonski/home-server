@@ -4,22 +4,22 @@ import {
   Card,
   Typography,
   TimePicker,
-  Button,
   Space,
   Progress,
   Alert,
-  Switch,
   Grid,
+  Menu,
   Message
 } from '@arco-design/web-react';
-import { IconSync, IconExclamationCircle } from '@arco-design/web-react/icon';
+import { IconExclamationCircle, IconHome } from '@arco-design/web-react/icon';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import axios from 'axios';
 import dayjs, { Dayjs } from 'dayjs';
 
-const { Content } = Layout;
+const { Content, Sider } = Layout;
 const { Title, Text } = Typography;
 const { Row, Col } = Grid;
+const MenuItem = Menu.Item;
 
 interface DeviceStatus {
   id: number;
@@ -33,7 +33,6 @@ interface DeviceStatus {
 
 interface AlarmTime {
   time: string;
-  armed: boolean;
 }
 
 interface SensorData {
@@ -42,19 +41,19 @@ interface SensorData {
   temperature: number;
 }
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8080';
+const API_URL = '';
 const UPDATE_INTERVAL = 300; // 5 minutes in seconds
 
 function App() {
   const [deviceStatus, setDeviceStatus] = useState<DeviceStatus | null>(null);
   const [alarmTime, setAlarmTime] = useState<AlarmTime | null>(null);
-  const [newAlarmTime, setNewAlarmTime] = useState<string>('');
   const [sensorData, setSensorData] = useState<SensorData[]>([]);
   const [progress, setProgress] = useState(100);
   const [lastUpdateTime, setLastUpdateTime] = useState<Date | null>(null);
   const [timePickerValue, setTimePickerValue] = useState<Dayjs | undefined>(
     alarmTime?.time ? dayjs(alarmTime.time, 'HH:mm') : undefined
   );
+  const [collapsed, setCollapsed] = useState(false);
 
   const fetchDeviceStatus = async () => {
     try {
@@ -99,15 +98,6 @@ function App() {
     }
   };
 
-  const toggleAlarmArmed = async (armed: boolean) => {
-    try {
-      await axios.post(`${API_URL}/api/alarm/arm`, { armed });
-      fetchAlarmTime();
-    } catch (error) {
-      console.error('Error toggling alarm:', error);
-    }
-  };
-
   useEffect(() => {
     fetchDeviceStatus();
     fetchAlarmTime();
@@ -147,107 +137,125 @@ function App() {
 
   const isUpdateOverdue = progress === 0;
 
+  const onCollapse = (collapsed: boolean, type: 'responsive' | 'clickTrigger') => {
+    setCollapsed(collapsed);
+  };
+
   return (
-    <Layout style={{ minHeight: '100vh', padding: '20px' }}>
-      <Content>
-        <Title heading={2}>Home Server Dashboard</Title>
+    <Layout style={{ minHeight: '100vh' }}>
+      <Sider
+        theme='dark'
+        breakpoint='lg'
+        onCollapse={onCollapse}
+        collapsed={collapsed}
+        width={220}
+        collapsible
+      >
+        <Menu
+          theme='dark'
+          defaultSelectedKeys={['waku']}
+          style={{ width: '100%' }}
+        >
+          <MenuItem key='waku'>
+            <IconHome />
+            Waku
+          </MenuItem>
+        </Menu>
+      </Sider>
+      <Layout>
+        <Content style={{ padding: '20px' }}>
+          <Title heading={2}>Home Server Dashboard</Title>
 
-        <Space direction="vertical" size="large" style={{ width: '100%', display: 'flex' }}>
-          {/* Device Status Card */}
-          <Card title="Device Status">
-            {deviceStatus ? (
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Text>Last Seen: {new Date(deviceStatus.last_seen).toLocaleString()}</Text>
-                <Progress
-                  percent={progress}
-                  status={isUpdateOverdue ? 'error' : 'normal'}
-                  formatText={() => `${Math.round(progress)}%`}
-                  animation
-                />
-                {deviceStatus.error_code && (
-                  <Alert
-                    type="error"
-                    content={deviceStatus.error_code}
-                    icon={<IconExclamationCircle />}
+          <Space direction="vertical" size="large" style={{ width: '100%', display: 'flex' }}>
+            {/* Device Status Card */}
+            <Card title="Device Status">
+              {deviceStatus ? (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Text>Last Seen: {new Date(deviceStatus.last_seen).toLocaleString()}</Text>
+                  <Progress
+                    percent={progress}
+                    status={isUpdateOverdue ? 'error' : 'normal'}
+                    formatText={() => `${Math.round(progress)}%`}
+                    animation
                   />
-                )}
-                {deviceStatus.alarm_active && (
-                  <Alert
-                    type="warning"
-                    title="Alarm Active"
-                    content={`Active for ${deviceStatus.alarm_active_time} seconds`}
-                    icon={<IconExclamationCircle />}
+                  {deviceStatus.error_code && (
+                    <Alert
+                      type="error"
+                      content={deviceStatus.error_code}
+                      icon={<IconExclamationCircle />}
+                    />
+                  )}
+                  {deviceStatus.alarm_active && (
+                    <Alert
+                      type="warning"
+                      title="Alarm Active"
+                      content={`Active for ${deviceStatus.alarm_active_time} seconds`}
+                      icon={<IconExclamationCircle />}
+                    />
+                  )}
+                </Space>
+              ) : (
+                <Text>No device status available</Text>
+              )}
+            </Card>
+
+            {/* Alarm Settings Card */}
+            <Card title="Alarm Settings">
+              <Space direction="vertical" size="large">
+                <Space>
+                  <TimePicker
+                    format="HH:mm"
+                    value={timePickerValue}
+                    onChange={(valueString: string, time: Dayjs) => {
+                      if (!time) return;
+                      const newTime = time.format('HH:mm');
+                      setTimePickerValue(time);
+                      // Use Promise.resolve to ensure we're not blocking the render
+                      Promise.resolve().then(() => {
+                        updateAlarmTime(newTime);
+                      });
+                    }}
                   />
-                )}
+                </Space>
               </Space>
-            ) : (
-              <Text>No device status available</Text>
-            )}
-          </Card>
+            </Card>
 
-          {/* Alarm Settings Card */}
-          <Card title="Alarm Settings">
-            <Space direction="vertical" size="large">
-              <Space>
-                <TimePicker
-                  format="HH:mm"
-                  value={timePickerValue}
-                  onChange={(valueString: string, time: Dayjs) => {
-                    if (!time) return;
-                    const newTime = time.format('HH:mm');
-                    setTimePickerValue(time);
-                    // Use Promise.resolve to ensure we're not blocking the render
-                    Promise.resolve().then(() => {
-                      updateAlarmTime(newTime);
-                    });
-                  }}
-                />
-              </Space>
-              <Space>
-                <Text>Alarm Armed:</Text>
-                <Switch
-                  checked={alarmTime?.armed}
-                  onChange={toggleAlarmArmed}
-                />
-              </Space>
-            </Space>
-          </Card>
-
-          {/* Sensor Data Charts */}
-          <Row gutter={[16, 16]}>
-            <Col span={12}>
-              <Card title="CO2 Levels">
-                <div style={{ width: '100%', height: 300 }}>
-                  <ResponsiveContainer>
-                    <LineChart data={sensorData}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="timestamp" />
-                      <YAxis />
-                      <Tooltip />
-                      <Line type="monotone" dataKey="co2_level" stroke="#8884d8" />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </Card>
-            </Col>
-            <Col span={12}>
-              <Card title="Temperature">
-                <div style={{ width: '100%', height: 300 }}>
-                  <ResponsiveContainer>
-                    <LineChart data={sensorData}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="timestamp" />
-                      <YAxis />
-                      <Tooltip />
-                      <Line type="monotone" dataKey="temperature" stroke="#82ca9d" />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </Card>
-            </Col>
-          </Row>
-        </Space>
-      </Content>
+            {/* Sensor Data Charts */}
+            <Row gutter={[16, 16]}>
+              <Col span={12}>
+                <Card title="CO2 Levels">
+                  <div style={{ width: '100%', height: 300 }}>
+                    <ResponsiveContainer>
+                      <LineChart data={sensorData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="timestamp" />
+                        <YAxis />
+                        <Tooltip />
+                        <Line type="monotone" dataKey="co2_level" stroke="#8884d8" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Card>
+              </Col>
+              <Col span={12}>
+                <Card title="Temperature">
+                  <div style={{ width: '100%', height: 300 }}>
+                    <ResponsiveContainer>
+                      <LineChart data={sensorData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="timestamp" />
+                        <YAxis />
+                        <Tooltip />
+                        <Line type="monotone" dataKey="temperature" stroke="#82ca9d" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Card>
+              </Col>
+            </Row>
+          </Space>
+        </Content>
+      </Layout>
     </Layout>
   );
 }
