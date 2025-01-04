@@ -26,9 +26,10 @@ interface DeviceStatus {
   last_seen: string;
   error_code?: string;
   co2_level: number;
-  temperature: number;
+  sound_level: number;
   alarm_active: boolean;
   alarm_active_time: number;
+  current_time: number;
 }
 
 interface AlarmTime {
@@ -38,7 +39,7 @@ interface AlarmTime {
 interface SensorData {
   timestamp: string;
   co2_level: number;
-  temperature: number;
+  sound_level: number;
 }
 
 const API_URL = '';
@@ -180,7 +181,7 @@ function App() {
                   />
                   {deviceStatus.error_code && (
                     <Alert
-                      type="error"
+                      type={deviceStatus.error_code === "NO ERROR" ? "success" : "error"}
                       content={deviceStatus.error_code}
                       icon={<IconExclamationCircle />}
                     />
@@ -238,7 +239,7 @@ function App() {
                 </Card>
               </Col>
               <Col span={12}>
-                <Card title="Temperature">
+                <Card title="Sound Level">
                   <div style={{ width: '100%', height: 300 }}>
                     <ResponsiveContainer>
                       <LineChart data={sensorData}>
@@ -246,7 +247,7 @@ function App() {
                         <XAxis dataKey="timestamp" />
                         <YAxis />
                         <Tooltip />
-                        <Line type="monotone" dataKey="temperature" stroke="#82ca9d" />
+                        <Line type="monotone" dataKey="sound_level" stroke="#82ca9d" />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>

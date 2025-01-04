@@ -18,9 +18,10 @@ type Device struct {
 	LastSeen        time.Time `json:"last_seen"`
 	ErrorCode       *string   `json:"error_code,omitempty"`
 	CO2Level        float64   `json:"co2_level"`
-	Temperature     float64   `json:"temperature"`
+	SoundLevel      float64   `json:"sound_level"`
 	AlarmActive     bool      `json:"alarm_active"`
 	AlarmActiveTime int64     `json:"alarm_active_time"` // in seconds
+	CurrentTime     int64     `json:"current_time"`      // Unix timestamp for Arduino
 }
 
 type AlarmTime struct {
@@ -29,9 +30,9 @@ type AlarmTime struct {
 }
 
 type SensorData struct {
-	Timestamp   time.Time `json:"timestamp"`
-	CO2Level    float64   `json:"co2_level"`
-	Temperature float64   `json:"temperature"`
+	Timestamp  time.Time `json:"timestamp"`
+	CO2Level   float64   `json:"co2_level"`
+	SoundLevel float64   `json:"sound_level"`
 }
 
 var db *sql.DB
@@ -57,14 +58,14 @@ func main() {
 
 	// Serve static files
 	e.Static("/static", "static/static")
-	
+
 	// Serve other static files from the root of the static directory
 	e.File("/favicon.ico", "static/favicon.ico")
 	e.File("/logo192.png", "static/logo192.png")
 	e.File("/logo512.png", "static/logo512.png")
 	e.File("/manifest.json", "static/manifest.json")
 	e.File("/robots.txt", "static/robots.txt")
-	
+
 	// Handle SPA routing - serve index.html for any unmatched routes
 	e.GET("/*", func(c echo.Context) error {
 		return c.File("static/index.html")
@@ -101,7 +102,7 @@ func createTables() {
 			last_seen TIMESTAMP NOT NULL,
 			error_code TEXT,
 			co2_level FLOAT NOT NULL DEFAULT 0,
-			temperature FLOAT NOT NULL DEFAULT 0,
+			sound_level FLOAT NOT NULL DEFAULT 0,
 			alarm_active BOOLEAN NOT NULL DEFAULT false,
 			alarm_active_time BIGINT NOT NULL DEFAULT 0
 		);
@@ -116,7 +117,7 @@ func createTables() {
 			id SERIAL PRIMARY KEY,
 			timestamp TIMESTAMP NOT NULL,
 			co2_level FLOAT NOT NULL,
-			temperature FLOAT NOT NULL
+			sound_level FLOAT NOT NULL
 		);
 
 		-- Index for faster time-based queries
@@ -130,15 +131,18 @@ func createTables() {
 func getDeviceStatus(c echo.Context) error {
 	var device Device
 	err := db.QueryRow(`
-		SELECT id, last_seen, error_code, co2_level, temperature, alarm_active, alarm_active_time 
+		SELECT id, last_seen, error_code, co2_level, sound_level, alarm_active, alarm_active_time 
 		FROM device_status 
 		ORDER BY last_seen DESC LIMIT 1
 	`).Scan(&device.ID, &device.LastSeen, &device.ErrorCode, &device.CO2Level,
-		&device.Temperature, &device.AlarmActive, &device.AlarmActiveTime)
+		&device.SoundLevel, &device.AlarmActive, &device.AlarmActiveTime)
 
 	if err != nil && err != sql.ErrNoRows {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+
+	// Add current time to response
+	device.CurrentTime = time.Now().Unix()
 
 	return c.JSON(http.StatusOK, device)
 }
@@ -146,7 +150,7 @@ func getDeviceStatus(c echo.Context) error {
 type DeviceUpdate struct {
 	ErrorCode       *string `json:"error_code"`
 	CO2Level        float64 `json:"co2_level"`
-	Temperature     float64 `json:"temperature"`
+	SoundLevel      float64 `json:"sound_level"`
 	AlarmActive     bool    `json:"alarm_active"`
 	AlarmActiveTime int64   `json:"alarm_active_time"`
 }
@@ -167,9 +171,9 @@ func handleDeviceUpdate(c echo.Context) error {
 	// Insert device status
 	_, err = tx.Exec(`
 		INSERT INTO device_status 
-		(last_seen, error_code, co2_level, temperature, alarm_active, alarm_active_time)
+		(last_seen, error_code, co2_level, sound_level, alarm_active, alarm_active_time)
 		VALUES ($1, $2, $3, $4, $5, $6)
-	`, time.Now(), update.ErrorCode, update.CO2Level, update.Temperature,
+	`, time.Now(), update.ErrorCode, update.CO2Level, update.SoundLevel,
 		update.AlarmActive, update.AlarmActiveTime)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -177,9 +181,9 @@ func handleDeviceUpdate(c echo.Context) error {
 
 	// Insert sensor data
 	_, err = tx.Exec(`
-		INSERT INTO sensor_data (timestamp, co2_level, temperature)
+		INSERT INTO sensor_data (timestamp, co2_level, sound_level)
 		VALUES ($1, $2, $3)
-	`, time.Now(), update.CO2Level, update.Temperature)
+	`, time.Now(), update.CO2Level, update.SoundLevel)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -196,7 +200,18 @@ func handleDeviceUpdate(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	return c.JSON(http.StatusOK, alarmTime)
+	// Create response with current time
+	response := struct {
+		Time        string `json:"time"`
+		Armed       bool   `json:"armed"`
+		CurrentTime int64  `json:"current_time"`
+	}{
+		Time:        alarmTime.Time,
+		Armed:       alarmTime.Armed,
+		CurrentTime: time.Now().Unix(),
+	}
+
+	return c.JSON(http.StatusOK, response)
 }
 
 func getAlarmTime(c echo.Context) error {
@@ -227,11 +242,11 @@ func setAlarmTime(c echo.Context) error {
 }
 
 func getSensorData(c echo.Context) error {
-	// Get sensor data for the last 24 hours
+	// Get raw sensor data for the last week
 	rows, err := db.Query(`
-		SELECT timestamp, co2_level, temperature 
+		SELECT timestamp, co2_level, sound_level
 		FROM sensor_data 
-		WHERE timestamp > NOW() - INTERVAL '24 hours'
+		WHERE timestamp > NOW() - INTERVAL '7 days'
 		ORDER BY timestamp ASC
 	`)
 	if err != nil {
@@ -242,7 +257,7 @@ func getSensorData(c echo.Context) error {
 	var data []SensorData
 	for rows.Next() {
 		var d SensorData
-		if err := rows.Scan(&d.Timestamp, &d.CO2Level, &d.Temperature); err != nil {
+		if err := rows.Scan(&d.Timestamp, &d.CO2Level, &d.SoundLevel); err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 		data = append(data, d)
