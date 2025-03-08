@@ -10,12 +10,16 @@ import {
   Grid,
   Menu,
   Message,
-  Button
+  Button,
+  Badge
 } from '@arco-design/web-react';
 import { IconExclamationCircle, IconHome } from '@arco-design/web-react/icon';
+import { TimePicker as AntTimePicker } from 'antd';
+import { ClockCircleOutlined } from '@ant-design/icons';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import axios from 'axios';
 import dayjs, { Dayjs } from 'dayjs';
+import 'antd/dist/reset.css';
 
 const { Content, Sider } = Layout;
 const { Title, Text } = Typography;
@@ -51,6 +55,13 @@ const CO2_THRESHOLDS = {
   GOOD: 800,
   MODERATE: 1000,
   HIGH: 1500,
+};
+
+// Helper function to check if device is connected
+const isDeviceConnected = (lastSeen: string | null): boolean => {
+  if (!lastSeen) return false;
+  const lastSeenDate = new Date(lastSeen);
+  return !isNaN(lastSeenDate.getTime()) && lastSeenDate.getFullYear() >= 2000;
 };
 
 function getCO2Color(level: number): string {
@@ -209,7 +220,9 @@ function App() {
             <Card title="Device Status">
               {deviceStatus ? (
                 <Space direction="vertical" style={{ width: '100%' }}>
-                  <Text>Last Seen: {deviceStatus.last_seen ? new Date(deviceStatus.last_seen).toLocaleString() : "Never connected"}</Text>
+                  <Text>Last Seen: {isDeviceConnected(deviceStatus.last_seen) ? 
+                    new Date(deviceStatus.last_seen).toLocaleString() : 
+                    "Not Connected"}</Text>
                   <Progress
                     percent={progress}
                     status={isUpdateOverdue ? 'error' : 'normal'}
@@ -231,23 +244,38 @@ function App() {
                       icon={<IconExclamationCircle />}
                     />
                   )}
-                  <Space>
-                    <Button
-                      type="primary"
-                      status="success"
-                      onClick={handleEnableAlarm}
-                      disabled={deviceStatus.alarm_enabled}
-                    >
-                      Enable Alarm
-                    </Button>
-                    <Button
-                      type="primary"
-                      status="danger"
-                      onClick={handleDisableAlarm}
-                      disabled={!deviceStatus.alarm_enabled}
-                    >
-                      Disable Alarm
-                    </Button>
+                  <Space direction="vertical" size="small">
+                    <Space align="center">
+                      {isDeviceConnected(deviceStatus.last_seen) ? (
+                        <Badge
+                          status={deviceStatus.alarm_enabled ? 'success' : 'error'}
+                          text={deviceStatus.alarm_enabled ? 'Alarm Enabled' : 'Alarm Disabled'}
+                        />
+                      ) : (
+                        <Badge
+                          status="default"
+                          text="Device Not Connected"
+                        />
+                      )}
+                    </Space>
+                    <Space>
+                      <Button
+                        type="primary"
+                        status="success"
+                        onClick={handleEnableAlarm}
+                        disabled={!isDeviceConnected(deviceStatus.last_seen) || deviceStatus.alarm_enabled}
+                      >
+                        Enable Alarm
+                      </Button>
+                      <Button
+                        type="primary"
+                        status="danger"
+                        onClick={handleDisableAlarm}
+                        disabled={!isDeviceConnected(deviceStatus.last_seen) || !deviceStatus.alarm_enabled}
+                      >
+                        Disable Alarm
+                      </Button>
+                    </Space>
                   </Space>
                 </Space>
               ) : (
@@ -257,22 +285,33 @@ function App() {
 
             {/* Alarm Settings Card */}
             <Card title="Alarm Settings">
-              <Space direction="vertical" size="large">
-                <Space>
-                  <TimePicker
-                    format="HH:mm"
-                    value={timePickerValue}
-                    onChange={(valueString: string, time: Dayjs) => {
-                      if (!time) return;
-                      const newTime = time.format('HH:mm');
-                      setTimePickerValue(time);
-                      // Use Promise.resolve to ensure we're not blocking the render
-                      Promise.resolve().then(() => {
-                        updateAlarmTime(newTime);
-                      });
-                    }}
-                  />
-                </Space>
+              <Space direction="vertical" size="large" style={{ width: '100%' }}>
+                <div style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center',
+                  padding: '16px',
+                  background: '#f5f5f5',
+                  borderRadius: '8px'
+                }}>
+                  <Space size={16}>
+                    <ClockCircleOutlined style={{ fontSize: '20px', color: '#1890ff' }} />
+                    <AntTimePicker
+                      format="HH:mm"
+                      value={timePickerValue}
+                      onChange={(time) => {
+                        if (!time) return;
+                        const newTime = time.format('HH:mm');
+                        setTimePickerValue(time);
+                        Promise.resolve().then(() => {
+                          updateAlarmTime(newTime);
+                        });
+                      }}
+                      style={{ width: '120px' }}
+                      popupStyle={{ zIndex: 1000 }}
+                    />
+                  </Space>
+                </div>
               </Space>
             </Card>
 
