@@ -254,12 +254,22 @@ func setAlarmTime(c echo.Context) error {
 }
 
 func getSensorData(c echo.Context) error {
-	// Get raw sensor data for the last week
+	// Get sensor data for the last 24 hours with 15-minute averages using standard PostgreSQL
 	rows, err := db.Query(`
-		SELECT timestamp, co2_level, sound_level
-		FROM sensor_data 
-		WHERE timestamp > NOW() - INTERVAL '7 days'
-		ORDER BY timestamp ASC
+		WITH time_buckets AS (
+			SELECT 
+				date_trunc('hour', timestamp) + 
+				INTERVAL '15 min' * FLOOR(EXTRACT(MINUTE FROM timestamp) / 15.0) AS bucket,
+				AVG(CASE WHEN co2_level != 0 THEN co2_level END) as avg_co2
+			FROM sensor_data 
+			WHERE timestamp > NOW() - INTERVAL '24 hours'
+			GROUP BY bucket
+			ORDER BY bucket ASC
+		)
+		SELECT 
+			bucket as timestamp,
+			COALESCE(avg_co2, 0) as co2_level
+		FROM time_buckets
 	`)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -269,7 +279,7 @@ func getSensorData(c echo.Context) error {
 	var data []SensorData
 	for rows.Next() {
 		var d SensorData
-		if err := rows.Scan(&d.Timestamp, &d.CO2Level, &d.SoundLevel); err != nil {
+		if err := rows.Scan(&d.Timestamp, &d.CO2Level); err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 		data = append(data, d)

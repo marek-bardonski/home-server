@@ -9,10 +9,11 @@ import {
   Alert,
   Grid,
   Menu,
-  Message
+  Message,
+  Button
 } from '@arco-design/web-react';
 import { IconExclamationCircle, IconHome } from '@arco-design/web-react/icon';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import axios from 'axios';
 import dayjs, { Dayjs } from 'dayjs';
 
@@ -30,6 +31,7 @@ interface DeviceStatus {
   alarm_active: boolean;
   alarm_active_time: number;
   current_time: number;
+  alarm_enabled: boolean;
 }
 
 interface AlarmTime {
@@ -39,11 +41,24 @@ interface AlarmTime {
 interface SensorData {
   timestamp: string;
   co2_level: number;
-  sound_level: number;
 }
 
 const API_URL = '';
 const UPDATE_INTERVAL = 300; // 5 minutes in seconds
+
+// Add new interface for CO2 thresholds
+const CO2_THRESHOLDS = {
+  GOOD: 800,
+  MODERATE: 1000,
+  HIGH: 1500,
+};
+
+function getCO2Color(level: number): string {
+  if (level <= CO2_THRESHOLDS.GOOD) return '#4CAF50';
+  if (level <= CO2_THRESHOLDS.MODERATE) return '#FFC107';
+  if (level <= CO2_THRESHOLDS.HIGH) return '#FF9800';
+  return '#F44336';
+}
 
 function App() {
   const [deviceStatus, setDeviceStatus] = useState<DeviceStatus | null>(null);
@@ -96,6 +111,28 @@ function App() {
       if (alarmTime?.time) {
         setTimePickerValue(dayjs(alarmTime.time, 'HH:mm'));
       }
+    }
+  };
+
+  const handleEnableAlarm = async () => {
+    try {
+      await axios.post(`${API_URL}/api/alarm/enable`);
+      Message.success('Alarm enabled successfully');
+      await fetchDeviceStatus();
+    } catch (error) {
+      console.error('Error enabling alarm:', error);
+      Message.error('Failed to enable alarm');
+    }
+  };
+
+  const handleDisableAlarm = async () => {
+    try {
+      await axios.post(`${API_URL}/api/alarm/disable`);
+      Message.success('Alarm disabled successfully');
+      await fetchDeviceStatus();
+    } catch (error) {
+      console.error('Error disabling alarm:', error);
+      Message.error('Failed to disable alarm');
     }
   };
 
@@ -194,6 +231,24 @@ function App() {
                       icon={<IconExclamationCircle />}
                     />
                   )}
+                  <Space>
+                    <Button
+                      type="primary"
+                      status="success"
+                      onClick={handleEnableAlarm}
+                      disabled={deviceStatus.alarm_enabled}
+                    >
+                      Enable Alarm
+                    </Button>
+                    <Button
+                      type="primary"
+                      status="danger"
+                      onClick={handleDisableAlarm}
+                      disabled={!deviceStatus.alarm_enabled}
+                    >
+                      Disable Alarm
+                    </Button>
+                  </Space>
                 </Space>
               ) : (
                 <Text>No device status available</Text>
@@ -223,34 +278,47 @@ function App() {
 
             {/* Sensor Data Charts */}
             <Row gutter={[16, 16]}>
-              <Col span={12}>
-                <Card title="CO2 Levels">
-                  <div style={{ width: '100%', height: 300 }}>
+              <Col span={24}>
+                <Card title="CO2 Levels (ppm) - Last 24 Hours">
+                  <div style={{ width: '100%', height: 400 }}>
                     <ResponsiveContainer>
                       <LineChart data={sensorData}>
                         <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="timestamp" />
-                        <YAxis />
-                        <Tooltip />
-                        <Line type="monotone" dataKey="co2_level" stroke="#8884d8" />
+                        <XAxis 
+                          dataKey="timestamp" 
+                          tickFormatter={(timestamp) => new Date(timestamp).toLocaleTimeString()}
+                        />
+                        <YAxis 
+                          domain={[0, 'auto']}
+                          label={{ value: 'CO2 (ppm)', angle: -90, position: 'insideLeft' }}
+                        />
+                        <Tooltip 
+                          formatter={(value: number) => [`${value} ppm`, 'CO2']}
+                          labelFormatter={(timestamp) => new Date(timestamp).toLocaleString()}
+                        />
+                        {/* Add reference lines for thresholds */}
+                        <ReferenceLine y={CO2_THRESHOLDS.GOOD} stroke="#4CAF50" strokeDasharray="3 3" label="Good" />
+                        <ReferenceLine y={CO2_THRESHOLDS.MODERATE} stroke="#FFC107" strokeDasharray="3 3" label="Moderate" />
+                        <ReferenceLine y={CO2_THRESHOLDS.HIGH} stroke="#F44336" strokeDasharray="3 3" label="High" />
+                        <Line 
+                          type="monotone" 
+                          dataKey="co2_level" 
+                          stroke="#8884d8"
+                          dot={false}
+                          strokeWidth={2}
+                          name="CO2"
+                          activeDot={{ r: 8 }}
+                        />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
-                </Card>
-              </Col>
-              <Col span={12}>
-                <Card title="Sound Level">
-                  <div style={{ width: '100%', height: 300 }}>
-                    <ResponsiveContainer>
-                      <LineChart data={sensorData}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="timestamp" />
-                        <YAxis />
-                        <Tooltip />
-                        <Line type="monotone" dataKey="sound_level" stroke="#82ca9d" />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
+                  <Space style={{ marginTop: 16 }}>
+                    <Text>Legend:</Text>
+                    <Text style={{ color: '#4CAF50' }}>≤ {CO2_THRESHOLDS.GOOD} ppm: Good</Text>
+                    <Text style={{ color: '#FFC107' }}>{CO2_THRESHOLDS.GOOD}-{CO2_THRESHOLDS.MODERATE} ppm: Moderate</Text>
+                    <Text style={{ color: '#FF9800' }}>{CO2_THRESHOLDS.MODERATE}-{CO2_THRESHOLDS.HIGH} ppm: High</Text>
+                    <Text style={{ color: '#F44336' }}>≥ {CO2_THRESHOLDS.HIGH} ppm: Very High</Text>
+                  </Space>
                 </Card>
               </Col>
             </Row>
