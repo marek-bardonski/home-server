@@ -1,0 +1,197 @@
+"""HomeKit bridge for the M5Stack HEX (37 SK6812 LEDs).
+
+Exposes the panel as an Apple Home Lightbulb. The saturation slider chooses
+the *mode*, not traditional HSV saturation:
+
+    sat <= 32  -> YELLOW solid lamp (hue tints it within +/-20 deg of 60)
+    sat <= 66  -> RED solid lamp    (hue tints it within +/-20 deg of 0)
+    sat >  66  -> EFFECTS (auto-cycle all 8 effects, ~60s each, hue ignored)
+
+Brightness scales output linearly in all modes, with a hard cap at POWER_CAP
+(0.85) so the 5V/3A supply stays inside budget.
+
+Runs as root because rpi_ws281x requires PWM access on GPIO 18.
+"""
+import colorsys
+import logging
+import signal
+import threading
+
+from pyhap.accessory import Accessory
+from pyhap.accessory_driver import AccessoryDriver
+from pyhap.const import CATEGORY_LIGHTBULB
+from rpi_ws281x import Color
+
+from hex_effects_lib import (
+    EFFECTS,
+    POWER_CAP,
+    blackout,
+    fill,
+    make_strip,
+    scale_rgb,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("hex_homekit")
+
+PERSIST_FILE = "/home/admin/hexled/hex_state.json"
+HAP_PORT = 51826
+BRIDGE_NAME = "HEX Lamp"
+
+YELLOW_CENTER_HUE = 60.0
+RED_CENTER_HUE = 0.0
+TINT_HALF_WIDTH = 20.0
+
+
+def mode_from_saturation(sat):
+    if sat <= 32:
+        return "YELLOW"
+    if sat <= 66:
+        return "RED"
+    return "EFFECTS"
+
+
+def compute_solid_rgb(mode, user_hue):
+    """Tint the mode's base color with the user's hue, clamped to +/-20 deg."""
+    base = YELLOW_CENTER_HUE if mode == "YELLOW" else RED_CENTER_HUE
+    delta = ((user_hue - base + 180.0) % 360.0) - 180.0
+    delta = max(-TINT_HALF_WIDTH, min(TINT_HALF_WIDTH, delta))
+    effective_hue = (base + delta) % 360.0
+    rf, gf, bf = colorsys.hsv_to_rgb(effective_hue / 360.0, 1.0, 1.0)
+    return int(rf * 255), int(gf * 255), int(bf * 255)
+
+
+class LampState:
+    def __init__(self, on=False, hue=60.0, saturation=20.0, brightness=80):
+        self._lock = threading.Lock()
+        self.on = on
+        self.hue = hue
+        self.saturation = saturation
+        self.brightness = brightness
+
+    def update(self, **kwargs):
+        with self._lock:
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    def snapshot(self):
+        with self._lock:
+            return (self.on, self.hue, self.saturation, self.brightness)
+
+
+class EffectsThread(threading.Thread):
+    def __init__(self, strip, state):
+        super().__init__(daemon=True, name="EffectsThread")
+        self.strip = strip
+        self.state = state
+        self.change_event = threading.Event()
+        self.stop_event = threading.Event()
+        self._effect_idx = 0
+
+    def notify(self):
+        self.change_event.set()
+
+    def shutdown(self):
+        self.stop_event.set()
+        self.change_event.set()
+        self.join(timeout=2.0)
+
+    def run(self):
+        log.info("EffectsThread started")
+        while not self.stop_event.is_set():
+            on, hue, sat, brightness = self.state.snapshot()
+            scale = (brightness / 100.0) * POWER_CAP if on else 0.0
+
+            if not on or scale == 0.0:
+                blackout(self.strip)
+                self.change_event.wait()
+                self.change_event.clear()
+                continue
+
+            mode = mode_from_saturation(sat)
+
+            if mode in ("YELLOW", "RED"):
+                r, g, b = compute_solid_rgb(mode, hue)
+                sr, sg, sb = scale_rgb(r, g, b, scale)
+                fill(self.strip, Color(sr, sg, sb))
+                self.change_event.wait()
+                self.change_event.clear()
+                continue
+
+            # EFFECTS: clear before running so a state change during the
+            # effect aborts it via change_event.
+            self.change_event.clear()
+            name, fn = EFFECTS[self._effect_idx % len(EFFECTS)]
+            log.info("effect: %s (scale=%.2f)", name, scale)
+            try:
+                fn(self.strip, self.change_event, scale)
+            except Exception:
+                log.exception("effect %s raised", name)
+            self._effect_idx += 1
+
+        blackout(self.strip)
+        log.info("EffectsThread exiting")
+
+
+class HexLamp(Accessory):
+    category = CATEGORY_LIGHTBULB
+
+    def __init__(self, driver, state, effects_thread, *args, **kwargs):
+        super().__init__(driver, BRIDGE_NAME, *args, **kwargs)
+        self._state = state
+        self._effects = effects_thread
+
+        serv = self.add_preload_service(
+            "Lightbulb", chars=["On", "Brightness", "Hue", "Saturation"])
+        on, hue, sat, brightness = state.snapshot()
+        self.char_on = serv.configure_char(
+            "On", value=on, setter_callback=self._set_on)
+        self.char_brightness = serv.configure_char(
+            "Brightness", value=brightness, setter_callback=self._set_brightness)
+        self.char_hue = serv.configure_char(
+            "Hue", value=hue, setter_callback=self._set_hue)
+        self.char_saturation = serv.configure_char(
+            "Saturation", value=sat, setter_callback=self._set_saturation)
+
+    def _set_on(self, value):
+        self._state.update(on=bool(value))
+        self._effects.notify()
+
+    def _set_brightness(self, value):
+        self._state.update(brightness=int(value))
+        self._effects.notify()
+
+    def _set_hue(self, value):
+        self._state.update(hue=float(value))
+        self._effects.notify()
+
+    def _set_saturation(self, value):
+        self._state.update(saturation=float(value))
+        self._effects.notify()
+
+
+def main():
+    strip = make_strip()
+    state = LampState()
+    effects_thread = EffectsThread(strip, state)
+
+    driver = AccessoryDriver(port=HAP_PORT, persist_file=PERSIST_FILE)
+    lamp = HexLamp(driver, state, effects_thread)
+    driver.add_accessory(accessory=lamp)
+
+    signal.signal(signal.SIGTERM, driver.signal_handler)
+    signal.signal(signal.SIGINT, driver.signal_handler)
+
+    effects_thread.start()
+    try:
+        driver.start()
+    finally:
+        effects_thread.shutdown()
+        blackout(strip)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+[Unit]
+Description=HEX HomeKit LED bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/admin/hexled/venv/bin/python /home/admin/hexled/hex_homekit.py
+WorkingDirectory=/home/admin/hexled
+Restart=on-failure
+RestartSec=3
+User=root
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

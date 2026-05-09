@@ -1,0 +1,5 @@
+.DS_Store
+*.local.conf
+secrets/
+__pycache__/
+*.pyc
