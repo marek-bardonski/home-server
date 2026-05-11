@@ -53,4 +53,8 @@ For each device it sources `device.conf`, rsyncs `files/` to `REMOTE_DIR`, then 
 
 Prospective devices:
 
-raspberry-hex (central server, near router, also night light)
+* raspberry-hex (central server, near router, also night light)
+* kuchnia (arduino uno Q 2GB, medicines counter)
+* sypialnia (arduino uno R4 WiFi, CO2 sensor)
+* komputer (arduino uno R3 CH 340)
+* gabinet (STM32L Discovery)
