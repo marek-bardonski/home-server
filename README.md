@@ -13,9 +13,17 @@ Each device lives in its own subdirectory under `devices/`. A device folder has:
   - `ENTRYPOINT` — script (relative to `REMOTE_DIR`) to run after sync
   - `RUN_AS_ROOT` — `true` to prefix the run command with `sudo`
   - `SCREEN_NAME` — optional; if set, the entrypoint runs inside a detached `screen` session of this name. On each update the previous session is killed before rsync and a fresh one is started afterward. Requires `screen` and (when combined with `RUN_AS_ROOT=true`) passwordless sudo on the device. Mutually exclusive with `SYSTEMD_UNIT`.
-  - `SYSTEMD_UNIT` — optional; if set, names a systemd unit file (e.g. `hexled.service`) present in `files/`. On each deploy `update.sh` stops the unit, rsyncs, then `install`s the unit to `/etc/systemd/system/`, runs `daemon-reload`, `enable`, and `restart`. Requires NOPASSWD sudo for `systemctl stop|start|restart|enable|disable|daemon-reload` and the matching `install` command. Mutually exclusive with `SCREEN_NAME`. When set, `ENTRYPOINT` becomes documentary (it must match the unit's `ExecStart` but is not invoked by `update.sh`).
-- `files/` — payload that gets `rsync`ed to `REMOTE_DIR` on the device
+  - `SYSTEMD_UNIT` — optional; if set, names a systemd unit file (e.g. `hexled.service`) present in `files/`. On each deploy `update.sh` stops the unit, rsyncs, then `install`s the unit to `/etc/systemd/system/`, runs `daemon-reload`, `enable`, and `restart`. Requires NOPASSWD sudo for `systemctl stop|start|restart|enable|disable|daemon-reload` and the matching `install` command. Mutually exclusive with `SCREEN_NAME`. When set, `ENTRYPOINT` becomes documentary (it must match the unit's `ExecStart` but is not invoked by `update.sh`). If `MQTT_HOST` is set in `.env`, `update.sh` also installs a root-only `/etc/home-server.env` (from `.env`) over ssh for the unit to read via `EnvironmentFile=`; this needs a NOPASSWD entry for `install -m 600 -o root -g root /dev/stdin /etc/home-server.env`.
+  - `ARDUINO_FQBN` / `ARDUINO_OTA_ADDRESS` / `ARDUINO_SKETCH` — optional; selects **Arduino mode** for microcontroller firmware (no SSH/rsync/systemd). `update.sh` generates `arduino_secrets.h` from `.env`, runs `arduino-cli compile`, then uploads — **automatically over USB if the board is plugged in, otherwise over Wi-Fi (OTA)** to `ARDUINO_OTA_ADDRESS` — and deletes the generated header (also on failure/Ctrl-C). USB is detected by matching `ARDUINO_FQBN` on a serial port in `arduino-cli board list`, so the same `./update.sh <device>` handles both the initial wired flash and all later wireless deploys with no manual steps. `ARDUINO_SKETCH` is the sketch directory under `files/`. Mutually exclusive with `SCREEN_NAME`/`SYSTEMD_UNIT`. Requires `arduino-cli` on the host.
+- `files/` — payload that gets `rsync`ed to `REMOTE_DIR` (or, in Arduino-OTA mode, the sketch tree compiled and flashed over Wi-Fi)
 - `README.md` — device-specific notes (hardware, wiring, setup, roadmap)
+
+Secrets are centralized in a single git-ignored `.env` at the repo root (shell
+`KEY=VALUE`; quote values containing spaces). `update.sh` sources it and feeds
+it to both deploy paths — Arduino compile-time `#define`s and the Pi
+`EnvironmentFile`. Nothing secret is committed and the generated
+`arduino_secrets.h` never persists. Keys: `SECRET_SSID`, `SECRET_PASS`,
+`SECRET_OTA_PASS`, `MQTT_HOST`, `MQTT_PORT`, `DASHBOARD_PORT`.
 
 ### Adding a new device
 
@@ -41,20 +49,18 @@ For each device it sources `device.conf`, rsyncs `files/` to `REMOTE_DIR`, then 
 
 | Name | Hardware | Purpose | Docs |
 |------|----------|---------|------|
-| raspberry-hex | Raspberry Pi Zero WH | Drive an M5Stack HEX (37 SK6812 RGB LEDs) over GPIO 18 | [README](devices/raspberry-hex/README.md) |
+| raspberry-hex | Raspberry Pi Zero WH | M5Stack HEX night light (GPIO 18) **and** the central CO2 hub: MQTT broker, HomeKit CO2 sensor, time-series dashboard, single SQLite store | [README](devices/raspberry-hex/README.md) |
+| sypialnia | Arduino UNO R4 WiFi | Read the MH-Z19B CO2 sensor and publish it over MQTT; deployed over Wi-Fi via Arduino OTA | [README](devices/sypialnia/README.md) |
 
 ### Future work
 
 - manage cron entries
 - run pre-deploy lint
 - support per-device `pre_update.sh` and `post_update.sh` hooks
-- support pulling secrets from a separate ignored file
-- generic per-device `.deployignore` to consolidate rsync excludes (currently `venv/`, `.venv/`, and `hex_state.json` are hardcoded in `update.sh`)
+- generic per-device `.deployignore` to consolidate rsync excludes (currently `venv/`, `.venv/`, `hex_state.json`, and `home.db*` are hardcoded in `update.sh`)
 
 Prospective devices:
 
-* raspberry-hex (central server, near router, also night light)
 * kuchnia (arduino uno Q 2GB, medicines counter)
-* sypialnia (arduino uno R4 WiFi, CO2 sensor)
 * komputer (arduino uno R3 CH 340)
 * gabinet (STM32L Discovery)

@@ -1,6 +1,10 @@
 # raspberry-hex
 
-Raspberry Pi Zero WH driving an M5Stack HEX (37 SK6812 RGB LEDs) over GPIO 18.
+Raspberry Pi Zero WH driving an M5Stack HEX (37 SK6812 RGB LEDs) over GPIO 18,
+**and** the central CO2 hub: it runs the MQTT broker, ingests readings from
+sensor nodes (e.g. `sypialnia`), exposes CO2 to Apple Home, serves a LAN
+dashboard, and stores everything in one SQLite DB. All of this runs in the
+single `hexled.service` process — see [CO2 hub](#co2-hub) below.
 
 ## Hardware
 
@@ -33,6 +37,12 @@ The HomeKit bridge enforces a hard `POWER_CAP = 0.85` (in `hex_effects_lib.py`);
 
 ## Pi-side setup (already done, documented for reference)
 
+> **Non-interactive shortcut:** the Mosquitto / venv-deps / sudoers steps in
+> this section are automated by `./devices/raspberry-hex/provision.sh
+> [user@host]`, run once from the host. It asks for the Pi sudo password once
+> (or set `SUDO_PASS`) and does the rest over a single ssh call. The manual
+> commands below remain as reference.
+
 OS: Raspberry Pi OS Bookworm, Python 3.13.
 
 One-time host configuration:
@@ -56,8 +66,18 @@ pip install --upgrade pip
 # for armv6l + cp313 yet; this avoids a long source compile on the Pi Zero.
 TMPDIR=/dev/shm pip install --only-binary=:all: \
     "zeroconf<0.140" "HAP-python[QRCode]" \
-    rpi_ws281x adafruit-circuitpython-neopixel
+    rpi_ws281x adafruit-circuitpython-neopixel \
+    paho-mqtt flask
 sudo apt install -y screen
+# CO2 hub: local MQTT broker that sensor nodes publish to.
+sudo apt install -y mosquitto mosquitto-clients
+sudo systemctl enable --now mosquitto
+# Allow LAN clients (the Arduino) to connect, not just localhost:
+sudo tee /etc/mosquitto/conf.d/lan.conf > /dev/null <<'EOF'
+listener 1883 0.0.0.0
+allow_anonymous true
+EOF
+sudo systemctl restart mosquitto
 ```
 
 `TMPDIR=/dev/shm` keeps pip's build directory in RAM, reducing SD card wear and slightly speeding things up.
@@ -66,7 +86,7 @@ Passwordless sudo is required so `update.sh` can stop the service, install the u
 
 ```bash
 sudo tee /etc/sudoers.d/hexled > /dev/null <<'EOF'
-admin ALL=(ALL) NOPASSWD: /bin/systemctl stop hexled.service, /bin/systemctl start hexled.service, /bin/systemctl restart hexled.service, /bin/systemctl enable hexled.service, /bin/systemctl disable hexled.service, /bin/systemctl daemon-reload, /usr/bin/install -m 644 -o root -g root /home/admin/hexled/hexled.service /etc/systemd/system/hexled.service
+admin ALL=(ALL) NOPASSWD: /bin/systemctl stop hexled.service, /bin/systemctl start hexled.service, /bin/systemctl restart hexled.service, /bin/systemctl enable hexled.service, /bin/systemctl disable hexled.service, /bin/systemctl daemon-reload, /usr/bin/install -m 644 -o root -g root /home/admin/hexled/hexled.service /etc/systemd/system/hexled.service, /usr/bin/install -m 600 -o root -g root /dev/stdin /etc/home-server.env
 EOF
 sudo chmod 440 /etc/sudoers.d/hexled
 ```
@@ -131,6 +151,47 @@ If a screen-based session from before the migration is still holding PWM, kill i
 ssh admin@raspberry.local 'sudo screen -S hexled -X quit || true'
 ```
 
+## CO2 hub
+
+The same `hexled.service` process also ingests sensor data. Sensor nodes (the
+`sypialnia` Arduino) publish to the local Mosquitto broker; `co2_mqtt.py`
+subscribes, and the reading fans out to three places:
+
+- **Apple Home** — a `CarbonDioxideSensor` service is added to the **existing
+  HEX accessory** (not a separate bridge), so the current `hex_state.json`
+  pairing is preserved. After the first deploy carrying this change, Home shows
+  a new CO2 sensor under the same accessory automatically (a config-number
+  bump) — **no need to remove or re-add the accessory**. `CarbonDioxideDetected`
+  trips above 1000 ppm.
+- **Dashboard** — `dashboard.py` serves a generic time-series graph at
+  `http://raspberry.local:8080/` (port from `DASHBOARD_PORT`). It lists
+  whatever `(device, metric)` pairs exist, so future metrics appear with no
+  code change.
+- **Storage** — `sensors_db.py` writes to a single SQLite DB at
+  `/home/admin/hexled/home.db` (generic `readings`/`device_state` tables,
+  MCP-friendly). It is excluded from rsync `--delete` (along with its `-wal`/
+  `-shm` sidecars) so history survives deploys, the same way `hex_state.json`
+  does for pairing.
+
+MQTT topics: `home/<device>/<metric>` (e.g. `home/sypialnia/co2` with JSON
+`{"ppm":812,"valid":true}`) plus `home/<device>/status` (`online`/`offline`
+via the Arduino's MQTT last-will).
+
+`MQTT_HOST`, `MQTT_PORT`, `DASHBOARD_PORT` reach the service through
+`/etc/home-server.env`, which `update.sh` installs (root-only, mode 600) from
+the repo-root `.env`. The unit reads it via `EnvironmentFile=-/etc/home-server.env`
+(optional, so the bridge still starts without it — defaults: `localhost:1883`,
+dashboard `:8080`). `paho-mqtt`/`flask` are best-effort imports: if the venv
+does not have them yet, CO2/dashboard are skipped and the LED bridge still runs.
+
+Quick checks:
+
+```bash
+ssh admin@raspberry.local 'mosquitto_sub -h localhost -t "home/#" -v'   # live MQTT
+curl -s http://raspberry.local:8080/api/latest                          # latest values
+```
+
 ## Roadmap
 
 - Named animation effects exposed as HomeKit modes (e.g., separate Switch accessories per effect)
+- Additional sensor metrics (temperature, humidity) — they slot into the existing generic schema and dashboard with no code change

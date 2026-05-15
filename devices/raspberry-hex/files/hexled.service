@@ -5,6 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Pushed by update.sh from the repo-root .env (MQTT_HOST/PORT, DASHBOARD_PORT).
+# Leading '-' makes it optional so the bridge still starts if it is absent.
+EnvironmentFile=-/etc/home-server.env
 ExecStart=/home/admin/hexled/venv/bin/python /home/admin/hexled/hex_homekit.py
 WorkingDirectory=/home/admin/hexled
 Restart=on-failure

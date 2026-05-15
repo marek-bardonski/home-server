@@ -30,6 +30,9 @@ from hex_effects_lib import (
     make_strip,
     scale_rgb,
 )
+from co2_mqtt import CO2Mqtt
+from dashboard import start_dashboard
+from sensors_db import SensorsDB
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +43,7 @@ log = logging.getLogger("hex_homekit")
 PERSIST_FILE = "/home/admin/hexled/hex_state.json"
 HAP_PORT = 51826
 BRIDGE_NAME = "HEX Lamp"
+CO2_DETECT_PPM = 1000  # CarbonDioxideDetected flips above this (waku threshold)
 
 YELLOW_CENTER_HUE = 60.0
 RED_CENTER_HUE = 0.0
@@ -156,6 +160,25 @@ class HexLamp(Accessory):
         self.char_saturation = serv.configure_char(
             "Saturation", value=sat, setter_callback=self._set_saturation)
 
+        # CO2 is a second service on this *same* accessory (not a Bridge), so
+        # the existing hex_state.json pairing is preserved — Home just shows a
+        # new sensor tile under the same accessory (a config-number bump, no
+        # manual re-pair).
+        co2 = self.add_preload_service(
+            "CarbonDioxideSensor",
+            chars=["CarbonDioxideDetected", "CarbonDioxideLevel"])
+        self.char_co2_detected = co2.configure_char(
+            "CarbonDioxideDetected", value=0)
+        self.char_co2_level = co2.configure_char(
+            "CarbonDioxideLevel", value=0)
+
+    def update_co2(self, device, ppm, valid):
+        """Called from the MQTT thread for each valid CO2 reading."""
+        if not valid or ppm <= 0:
+            return
+        self.char_co2_level.set_value(min(int(ppm), 100000))
+        self.char_co2_detected.set_value(1 if ppm > CO2_DETECT_PPM else 0)
+
     def _set_on(self, value):
         self._state.update(on=bool(value))
         self._effects.notify()
@@ -185,10 +208,19 @@ def main():
     signal.signal(signal.SIGTERM, driver.signal_handler)
     signal.signal(signal.SIGINT, driver.signal_handler)
 
+    # Single SQLite store + MQTT ingestion + LAN dashboard, sharing this
+    # process. CO2Mqtt/start_dashboard are best-effort: a missing optional
+    # dep disables only its own feature; the LED bridge keeps running.
+    db = SensorsDB()
+    co2_mqtt = CO2Mqtt(db, on_co2=lamp.update_co2)
+    co2_mqtt.start()
+    start_dashboard(db)
+
     effects_thread.start()
     try:
         driver.start()
     finally:
+        co2_mqtt.stop()
         effects_thread.shutdown()
         blackout(strip)
 
