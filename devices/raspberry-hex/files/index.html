@@ -73,14 +73,29 @@ async function loadChart() {
       fill: true, pointRadius: 0, tension: .25,
     }]
   };
+  const longRange = Number(hours) > 24;
+  const fmtTick = (ms) => {
+    const d = new Date(ms), p = n => String(n).padStart(2, '0');
+    return longRange
+      ? `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00`
+      : `${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
   const opts = {
     animation: false,
     scales: {
-      x: { type: 'time', time: { unit: hours <= 24 ? 'hour' : 'day' },
-           ticks: { color:'#999' }, grid: { color:'#262626' } },
-      y: { ticks: { color:'#999' }, grid: { color:'#262626' } },
+      x: { type: 'linear', bounds: 'data',
+           ticks: { color:'#999', maxTicksLimit: 8, autoSkip: true,
+                    callback: v => fmtTick(v) },
+           grid: { color:'#262626' } },
+      y: { ticks: { color:'#999' }, grid: { color:'#262626' },
+           title: { display: true, text: m.metric, color:'#999' } },
     },
-    plugins: { legend: { labels: { color:'#ccc' } } },
+    plugins: {
+      legend: { labels: { color:'#ccc' } },
+      tooltip: { callbacks: {
+        title: items => items.length
+          ? new Date(items[0].parsed.x).toLocaleString() : '' } },
+    },
   };
   if (chart) { chart.data = data; chart.options = opts; chart.update(); }
   else { chart = new Chart(document.getElementById('chart'), { type:'line', data, options:opts }); }
@@ -90,16 +105,15 @@ async function loadChart() {
     : 'No data in this range.';
 }
 
-// Chart.js time scale needs a date adapter; load a tiny one lazily.
-const adapter = document.createElement('script');
-adapter.src = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js';
-adapter.onload = async () => { await loadMetrics(); await loadChart(); };
-document.head.appendChild(adapter);
+// Linear x-axis with hand-formatted time labels — no external date adapter,
+// so the time axis (and Refresh) work even if the box has no internet.
+async function refreshAll() { await loadMetrics(); await loadChart(); }
 
 metricSel.onchange = loadChart;
 hoursSel.onchange = loadChart;
-document.getElementById('refresh').onclick = async () => { await loadMetrics(); await loadChart(); };
-setInterval(async () => { await loadMetrics(); await loadChart(); }, 30000);
+document.getElementById('refresh').onclick = refreshAll;
+setInterval(refreshAll, 30000);
+refreshAll();
 </script>
 </body>
 </html>

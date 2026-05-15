@@ -4,8 +4,9 @@
  * Trimmed from the reference `waku` sketch. Only three responsibilities:
  *   1. OTA over Wi-Fi — the deploy transport driven by ../../../update.sh.
  *   2. Read the MH-Z19B CO2 sensor and publish it over MQTT.
- *   3. Flash the outward-facing RGB LED so the box visibly shows it is alive
- *      (TEMPORARY test indicator — see the fenced block in loop()).
+ *   3. Drive the outward-facing RGB LED as a HomeKit lamp: it follows the
+ *      retained command on home/sypialnia/led/set (on/off + brightness),
+ *      published by the raspberry-hex HomeKit bridge.
  *
  * Everything else from waku (alarm, dawn light, buzzer, OLED, RTC, button,
  * LED matrix, HTTP client, FreeRTOS) is intentionally omitted. The full
@@ -32,14 +33,54 @@ static const unsigned long CO2_PUBLISH_INTERVAL_MS = 15000;
 static const unsigned long WIFI_RETRY_INTERVAL_MS  = 5000;
 
 // --- MQTT topics (home/<device>/<metric>) ---
-static const char* MQTT_TOPIC_CO2    = "home/sypialnia/co2";
-static const char* MQTT_TOPIC_STATUS = "home/sypialnia/status";
+static const char* MQTT_TOPIC_CO2     = "home/sypialnia/co2";
+static const char* MQTT_TOPIC_STATUS  = "home/sypialnia/status";
+// Inbound LED command from the HomeKit bridge; retained, so the broker
+// replays the last state to us on every (re)connect.
+static const char* MQTT_TOPIC_LED_SET = "home/sypialnia/led/set";
 
 WiFiClient wifiClient;
 MqttClient mqttClient(wifiClient);
 CO2Sensor  co2Sensor(CO2_PWM_PIN);
 
 unsigned long lastCo2Publish = 0;
+
+// LED state, driven by HomeKit via the retained MQTT command topic above.
+bool gLedOn = false;
+int  gLedBrightness = 100;  // HomeKit brightness, 0..100
+
+void applyLed() {
+  // White lamp: drive R/G/B equally, scaled 0..255 from the HomeKit
+  // brightness (0..100). Off forces 0 regardless of brightness.
+  int duty = gLedOn ? (int)((long)gLedBrightness * 255 / 100) : 0;
+  analogWrite(LED_R_PIN, duty);
+  analogWrite(LED_G_PIN, duty);
+  analogWrite(LED_B_PIN, duty);
+}
+
+void onMqttMessage(int /*messageSize*/) {
+  // Only the LED command is subscribed. Read the payload, then parse it
+  // minimally — no ArduinoJson dependency, mirroring the hand-built JSON
+  // used for publishing. Hub sends compact {"on":true,"brightness":80}.
+  char buf[80];
+  int n = 0;
+  while (mqttClient.available() && n < (int)sizeof(buf) - 1) {
+    buf[n++] = (char)mqttClient.read();
+  }
+  buf[n] = '\0';
+
+  gLedOn = strstr(buf, "\"on\":true") != nullptr;
+  const char* bp = strstr(buf, "\"brightness\":");
+  if (bp) {
+    int b = atoi(bp + 13);  // strlen("\"brightness\":") == 13
+    gLedBrightness = b < 0 ? 0 : (b > 100 ? 100 : b);
+  }
+  applyLed();
+  Serial.print("LED cmd: on=");
+  Serial.print(gLedOn ? "1" : "0");
+  Serial.print(" brightness=");
+  Serial.println(gLedBrightness);
+}
 
 bool connectToWiFi() {
   if (WiFi.status() == WL_CONNECTED) return true;
@@ -61,7 +102,12 @@ void beginOta() {
   // OTA must be available whenever Wi-Fi is up; serviced by ArduinoOTA.poll()
   // in loop() every iteration (the reference waku never polled it, so its
   // OTA never actually worked).
-  ArduinoOTA.begin(WiFi.localIP(), "Arduino", SECRET_OTA_PASS, InternalStorage);
+  //
+  // The 2nd arg is the mDNS name the board advertises for OTA discovery; it
+  // MUST match ARDUINO_OTA_ADDRESS in device.conf (sypialnia.local) or
+  // arduino-cli reports "No device found". The waku default of "Arduino"
+  // advertised as Arduino.local and never matched.
+  ArduinoOTA.begin(WiFi.localIP(), "sypialnia", SECRET_OTA_PASS, InternalStorage);
 }
 
 bool connectToMqtt() {
@@ -88,6 +134,10 @@ bool connectToMqtt() {
   mqttClient.beginMessage(MQTT_TOPIC_STATUS, true);
   mqttClient.print("online");
   mqttClient.endMessage();
+
+  // (Re)subscribe on every (re)connect. The command is published retained,
+  // so the broker immediately replays the last LED state to onMqttMessage().
+  mqttClient.subscribe(MQTT_TOPIC_LED_SET, 1);
   return true;
 }
 
@@ -116,6 +166,10 @@ void setup() {
   pinMode(LED_B_PIN, OUTPUT);
 
   co2Sensor.begin();
+  applyLed();  // defined initial state (off) until the first command arrives
+
+  // Register once; the callback pointer persists across MQTT reconnects.
+  mqttClient.onMessage(onMqttMessage);
 
   connectToWiFi();
   beginOta();
@@ -143,18 +197,7 @@ void loop() {
     if (mqttClient.connected()) publishCo2();
   }
 
-  // ===== TEMPORARY heartbeat (test only — remove before production) =========
-  // Colorful rotating glow on the outward-facing RGB LED so the box visibly
-  // shows the firmware is alive. To retire the indicator, delete this whole
-  // fenced block plus the LED_*_PIN consts and their pinMode() calls.
-  {
-    float phase = (now % 3000) / 3000.0f * 2.0f * PI;
-    int r = (int)(127.0f + 127.0f * sin(phase));
-    int g = (int)(127.0f + 127.0f * sin(phase + 2.094f));   // +120 deg
-    int b = (int)(127.0f + 127.0f * sin(phase + 4.189f));   // +240 deg
-    analogWrite(LED_R_PIN, r);
-    analogWrite(LED_G_PIN, g);
-    analogWrite(LED_B_PIN, b);
-  }
-  // ===== end TEMPORARY heartbeat ===========================================
+  // The LED is event-driven: onMqttMessage() applies each HomeKit command as
+  // it arrives (and the retained command replays on reconnect), so loop()
+  // has nothing periodic to do for it.
 }

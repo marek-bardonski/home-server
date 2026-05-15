@@ -1,9 +1,12 @@
-"""MQTT subscriber: bridges sensor nodes (e.g. `sypialnia`) into the DB,
-HomeKit, and the dashboard.
+"""MQTT bridge between sensor nodes (e.g. `sypialnia`) and the DB, HomeKit,
+and the dashboard. Subscribes to inbound sensor topics and also publishes
+outbound control commands (e.g. the HomeKit-driven LED).
 
 Topics (home/<device>/<metric>):
-    home/+/co2     JSON {"ppm": <int>, "valid": <bool>}
-    home/+/status  "online" | "offline"  (Arduino LWT)
+    home/+/co2          JSON {"ppm": <int>, "valid": <bool>}  (in)
+    home/+/status       "online" | "offline"  (Arduino LWT)   (in)
+    home/sypialnia/led/set  JSON {"on": <bool>, "brightness": 0..100}
+                            published retained by the HomeKit bridge  (out)
 
 The broker runs locally on raspberry-hex, so MQTT_HOST defaults to localhost.
 paho auto-reconnects via loop_forever(), so a node or broker restart is
@@ -85,6 +88,22 @@ class CO2Mqtt(threading.Thread):
                     break
                 log.exception("MQTT loop crashed; retrying in 5s")
                 self._stop.wait(5)
+
+    def publish(self, topic, payload, qos=1, retain=True):
+        """Publish an outbound command. Thread-safe: paho's publish() may be
+        called from another thread while loop_forever() runs. Best-effort —
+        if the client is not connected yet the message is dropped (a retained
+        command will simply be re-sent on the next HomeKit interaction)."""
+        client = self._client
+        if client is None or not client.is_connected():
+            log.warning("MQTT not connected; dropping publish to %s", topic)
+            return False
+        try:
+            client.publish(topic, payload, qos=qos, retain=retain)
+            return True
+        except Exception:
+            log.exception("MQTT publish to %s failed", topic)
+            return False
 
     def stop(self):
         self._stop.set()

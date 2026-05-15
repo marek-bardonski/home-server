@@ -6,7 +6,7 @@ and the dashboard). Deployed **over Wi-Fi via Arduino OTA**, driven by
 `../../update.sh` — OTA is this device's equivalent of the pipeline's rsync.
 
 This firmware is a deliberately minimal slice of the reference `waku` project:
-only CO2 read + MQTT publish + OTA + a temporary "alive" LED. Alarm, dawn
+only CO2 read + MQTT publish + OTA + a HomeKit-controlled RGB LED. Alarm, dawn
 light, buzzer, OLED, RTC, button, LED matrix and the old HTTP client are
 intentionally omitted. The complete original wiring is preserved below so the
 unused peripherals can be brought back later without re-deriving the pinout.
@@ -35,8 +35,22 @@ unused peripherals can be brought back later without re-deriving the pinout.
 - **SDA/SCL** → OLED 0.91"
 
 This firmware only uses **PIN 2** (CO2) and **PINS 9/10/11** (the outward-facing
-RGB LED, currently driving a temporary colorful heartbeat to show the box is
-alive — see the fenced block in `files/sypialnia/sypialnia.ino`).
+RGB LED, driven as a white dimmable HomeKit lamp).
+
+## MQTT topics
+
+Sensor data flows node → hub; the LED command flows hub → node:
+
+| Topic | Dir | Payload |
+|-------|-----|---------|
+| `home/sypialnia/co2`     | out | `{"ppm":<int>,"valid":<bool>}` |
+| `home/sypialnia/status`  | out | `online` / `offline` (MQTT last-will) |
+| `home/sypialnia/led/set` | in  | `{"on":<bool>,"brightness":0..100}`, **retained** |
+
+The LED command is published **retained** by the raspberry-hex HomeKit bridge,
+so the broker replays the last on/off + brightness to the node every time it
+(re)connects — the physical LED survives a node reboot without HomeKit
+re-issuing the command.
 
 ## Required libraries
 
@@ -94,30 +108,47 @@ command deploys wirelessly. If `sypialnia.local` does not resolve for the
 wireless path, run `arduino-cli board list` (it lists network ports too) and
 set `ARDUINO_OTA_ADDRESS` in `device.conf` to the board's IP.
 
-## OTA caveats (preserved from the original `waku`, still apply)
+## OTA caveats (Apple-Silicon Mac host — applied, working)
 
-The ArduinoOTA library is finicky. Lessons carried over verbatim:
+The ArduinoOTA toolchain is finicky. What actually makes wireless OTA work
+from an Apple-Silicon (arm64) Mac — all of this is **already applied** on the
+current host; reproduce it on any new host:
 
-1. The ArduinoOTA binary does not work on Apple-Silicon Macs — there is no
-   native release, the Intel build is used by default even on Apple Silicon,
-   and that causes a hard-to-diagnose segmentation fault. Rosetta 2 did not
-   help. A Linux/Windows VM (e.g. VMware) works for both wired flashing and
-   wireless OTA; use proper electrical isolation or a backup device because of
-   the (low) risk of shorting the USB-C port.
-2. Download the latest `arduinoOTA` release binary from
-   <https://github.com/arduino/arduinoOTA/releases> (1.4.1 was used) and
-   replace the one shipped by the Arduino tooling — the shipped one lacks the
-   `-t` (timeout) flag.
-3. The board needs `platform.local.txt` from
-   <https://github.com/JAndrassy/ArduinoOTA/tree/master/extras/renesas> placed
-   next to `platform.txt` in the renesas core directory, with `-t 60` appended
-   to all 4 upload patterns, e.g.:
+1. **Native arm64 uploader.** The old lore that "there is no native macOS
+   release, so use a Linux/Windows VM" is **outdated**: `arduinoOTA` 1.4.1
+   ships `arduinoOTA_1.4.1_macOS_ARM64.tar.gz`. The segfault happened only
+   because the renesas core bundles the **Intel** `arduinoOTA` (it ran under
+   Rosetta and crashed). Fix — replace the bundled binary with the native
+   arm64 one (it also has the `-t` flag, so this covers the old caveat #2):
+
+   ```bash
+   DEST=~/Library/Arduino15/packages/arduino/tools/arduinoOTA/1.3.0/bin/arduinoOTA
+   curl -fsSL https://github.com/arduino/arduinoOTA/releases/download/1.4.1/arduinoOTA_1.4.1_macOS_ARM64.tar.gz | tar xz
+   cp "$DEST" "$DEST.x86_64.bak"            # keep the original
+   cp arduinoOTA_osx_darwin_arm64/arduinoOTA "$DEST"
+   chmod +x "$DEST"; xattr -d com.apple.quarantine "$DEST" 2>/dev/null || true
+   file "$DEST"   # must say: Mach-O 64-bit executable arm64
+   ```
+
+2. **`-t 60` timeout patch.** `platform.local.txt` (from
+   <https://github.com/JAndrassy/ArduinoOTA/tree/master/extras/renesas>) sits
+   next to `platform.txt` in the renesas core
+   (`~/Library/Arduino15/packages/arduino/hardware/renesas_uno/1.5.3/`) with
+   ` -t 60` appended to all 4 upload patterns, e.g.:
 
    ```
    tools.arduino_ota.upload.pattern="{cmd}" -address "{upload.port.address}" -port 65280 -username arduino -password "{upload.field.password}" -sketch "{build.path}/{build.project_name}.bin" -upload /sketch -b -t 60
    ```
 
-If OTA upload fails, confirm: the board is powered and on Wi-Fi, host and board
-are on the same network, the firewall is not blocking, and the 60-second
-timeout is configured. The Arduino IDE network port is the manual fallback
-(Tools → Port → Network Ports → pick the board → upload normally).
+3. **Address, not name.** The board advertises its `_arduino._tcp` mDNS
+   service (so `arduino-cli board list` finds it) but `sypialnia.local` does
+   **not** resolve via the OS mDNS resolver on this LAN. So
+   `ARDUINO_OTA_ADDRESS` in `device.conf` is the **IP**, not the hostname —
+   pin it with a router DHCP reservation and re-check with
+   `arduino-cli board list` if it ever changes.
+
+If OTA still fails, confirm: the board is powered and on Wi-Fi (HomeKit/CO2
+working proves this), host and board on the same network, firewall not
+blocking UDP/mDNS + TCP 65280, and the installed `arduinoOTA` is arm64
+(`file` check above). The Arduino IDE network port remains the manual
+fallback (Tools → Port → Network Ports → pick the board → upload normally).

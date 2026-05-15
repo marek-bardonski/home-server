@@ -111,20 +111,51 @@ EOF
         # Explicit rc handling: set -e is disabled inside a function called
         # from `if`, so guard each step and always remove the header.
         rc=0
+        build_dir="$(mktemp -d)"
         echo "  -> arduino-cli compile"
-        arduino-cli compile --fqbn "$ARDUINO_FQBN" "$sketch_dir" || rc=$?
+        arduino-cli compile --fqbn "$ARDUINO_FQBN" \
+            --output-dir "$build_dir" "$sketch_dir" || rc=$?
+
         if [ "$rc" -eq 0 ] && [ -n "$usb_port" ]; then
             echo "  -> arduino-cli upload (USB) to $usb_port"
-            # No --upload-field: the serial protocol has no password field.
-            arduino-cli upload -p "$usb_port" --fqbn "$ARDUINO_FQBN" "$sketch_dir" || rc=$?
+            # --input-dir reuses the compile above (no recompile). No
+            # --upload-field: the serial protocol has no password field.
+            arduino-cli upload -p "$usb_port" --fqbn "$ARDUINO_FQBN" \
+                --input-dir "$build_dir" "$sketch_dir" || rc=$?
         elif [ "$rc" -eq 0 ]; then
-            echo "  -> arduino-cli upload (network/OTA) to $ARDUINO_OTA_ADDRESS"
-            arduino-cli upload -p "$ARDUINO_OTA_ADDRESS" --fqbn "$ARDUINO_FQBN" \
-                --upload-field password="$SECRET_OTA_PASS" "$sketch_dir" || rc=$?
+            # Network/OTA: invoke the arduinoOTA tool directly.
+            # `arduino-cli upload -p <ip>` refuses with "No device found"
+            # unless the board is mDNS-discoverable, and this R4 advertises
+            # no discoverable _arduino._tcp service (not in `board list`,
+            # avahi can't see it). The tool itself only needs IP + port +
+            # password — exactly what arduino-cli would have run, minus its
+            # discovery gate. The arm64 binary + `-t 60` patch are set up
+            # per devices/sypialnia/README.md "OTA caveats".
+            ota_bin=""
+            for d in "$(arduino-cli config get directories.data 2>/dev/null || true)" \
+                     "$HOME/Library/Arduino15" "$HOME/.arduino15"; do
+                [ -n "$d" ] || continue
+                cand="$(ls -1 "$d"/packages/arduino/tools/arduinoOTA/*/bin/arduinoOTA 2>/dev/null | sort | tail -1)"
+                [ -n "$cand" ] && { ota_bin="$cand"; break; }
+            done
+            sketch_bin="$(ls -1 "$build_dir"/*.ino.bin 2>/dev/null | grep -v with_bootloader | head -1)"
+            if [ -z "$ota_bin" ] || [ ! -x "$ota_bin" ]; then
+                echo "  ERROR: arduinoOTA tool not found under the arduino-cli data dir" >&2
+                rc=1
+            elif [ -z "$sketch_bin" ]; then
+                echo "  ERROR: compiled .ino.bin not found in $build_dir" >&2
+                rc=1
+            else
+                echo "  -> arduinoOTA (network) to $ARDUINO_OTA_ADDRESS:65280"
+                "$ota_bin" -address "$ARDUINO_OTA_ADDRESS" -port 65280 \
+                    -username arduino -password "$SECRET_OTA_PASS" \
+                    -sketch "$sketch_bin" -upload /sketch -b -t 60 || rc=$?
+            fi
         fi
         rm -f "$secrets_h"
+        rm -rf "$build_dir"
         [ "$rc" -eq 0 ] && return 0
-        echo "  ERROR: arduino-cli failed (rc=$rc)" >&2
+        echo "  ERROR: arduino deploy failed (rc=$rc)" >&2
         return 1
     fi
 

@@ -2,7 +2,8 @@
 
 Raspberry Pi Zero WH driving an M5Stack HEX (37 SK6812 RGB LEDs) over GPIO 18,
 **and** the central CO2 hub: it runs the MQTT broker, ingests readings from
-sensor nodes (e.g. `sypialnia`), exposes CO2 to Apple Home, serves a LAN
+sensor nodes (e.g. `sypialnia`), exposes CO2 and the bedroom LED to Apple
+Home, serves a LAN
 dashboard, and stores everything in one SQLite DB. All of this runs in the
 single `hexled.service` process — see [CO2 hub](#co2-hub) below.
 
@@ -163,6 +164,12 @@ subscribes, and the reading fans out to three places:
   a new CO2 sensor under the same accessory automatically (a config-number
   bump) — **no need to remove or re-add the accessory**. `CarbonDioxideDetected`
   trips above 1000 ppm.
+- **Bedroom LED** — a third `Lightbulb` service ("Bedroom LED", On +
+  Brightness) is added to the **same accessory**. Its setters publish a
+  **retained** JSON command to `home/sypialnia/led/set`; the `sypialnia`
+  Arduino subscribes and drives its outward RGB LED as a white dimmable lamp.
+  Retained means the broker replays the last state to the node on every
+  reconnect, so the LED survives a node reboot without HomeKit re-issuing it.
 - **Dashboard** — `dashboard.py` serves a generic time-series graph at
   `http://raspberry.local:8080/` (port from `DASHBOARD_PORT`). It lists
   whatever `(device, metric)` pairs exist, so future metrics appear with no
@@ -173,9 +180,11 @@ subscribes, and the reading fans out to three places:
   `-shm` sidecars) so history survives deploys, the same way `hex_state.json`
   does for pairing.
 
-MQTT topics: `home/<device>/<metric>` (e.g. `home/sypialnia/co2` with JSON
-`{"ppm":812,"valid":true}`) plus `home/<device>/status` (`online`/`offline`
-via the Arduino's MQTT last-will).
+MQTT topics: inbound `home/<device>/<metric>` (e.g. `home/sypialnia/co2` with
+JSON `{"ppm":812,"valid":true}`) plus `home/<device>/status`
+(`online`/`offline` via the Arduino's MQTT last-will); outbound
+`home/sypialnia/led/set` (retained `{"on":<bool>,"brightness":0..100}`,
+published by the HomeKit LED setters).
 
 `MQTT_HOST`, `MQTT_PORT`, `DASHBOARD_PORT` reach the service through
 `/etc/home-server.env`, which `update.sh` installs (root-only, mode 600) from

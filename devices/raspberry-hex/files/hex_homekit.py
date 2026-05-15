@@ -13,6 +13,7 @@ Brightness scales output linearly in all modes, with a hard cap at POWER_CAP
 Runs as root because rpi_ws281x requires PWM access on GPIO 18.
 """
 import colorsys
+import json
 import logging
 import signal
 import threading
@@ -44,6 +45,12 @@ PERSIST_FILE = "/home/admin/hexled/hex_state.json"
 HAP_PORT = 51826
 BRIDGE_NAME = "HEX Lamp"
 CO2_DETECT_PPM = 1000  # CarbonDioxideDetected flips above this (waku threshold)
+
+# The sypialnia node's outward RGB LED, exposed here as a separate Lightbulb
+# service. Setter callbacks publish a retained command the Arduino subscribes
+# to, so the physical LED also survives a node reboot (broker replays it).
+SYPIALNIA_LED_CMD_TOPIC = "home/sypialnia/led/set"
+SYPIALNIA_LED_NAME = "Bedroom LED"
 
 YELLOW_CENTER_HUE = 60.0
 RED_CENTER_HUE = 0.0
@@ -147,6 +154,8 @@ class HexLamp(Accessory):
         super().__init__(driver, BRIDGE_NAME, *args, **kwargs)
         self._state = state
         self._effects = effects_thread
+        self._mqtt = None  # set via set_mqtt() once CO2Mqtt exists
+        self._led = {"on": False, "brightness": 100}
 
         serv = self.add_preload_service(
             "Lightbulb", chars=["On", "Brightness", "Hue", "Saturation"])
@@ -171,6 +180,42 @@ class HexLamp(Accessory):
             "CarbonDioxideDetected", value=0)
         self.char_co2_level = co2.configure_char(
             "CarbonDioxideLevel", value=0)
+
+        # The sypialnia RGB LED as a third service on this same accessory
+        # (same pairing-preservation rationale as the CO2 sensor above). On +
+        # Brightness only — it is driven as a plain white dimmable lamp.
+        led = self.add_preload_service(
+            "Lightbulb", chars=["On", "Brightness", "Name"])
+        led.configure_char("Name", value=SYPIALNIA_LED_NAME)
+        self.char_led_on = led.configure_char(
+            "On", value=self._led["on"], setter_callback=self._set_led_on)
+        self.char_led_brightness = led.configure_char(
+            "Brightness", value=self._led["brightness"],
+            setter_callback=self._set_led_brightness)
+
+    def set_mqtt(self, mqtt):
+        """Wire the MQTT publisher (CO2Mqtt) used by the LED setters. Called
+        from main() after CO2Mqtt is constructed."""
+        self._mqtt = mqtt
+
+    def _publish_led(self):
+        if self._mqtt is None:
+            log.warning("LED command dropped: MQTT publisher not wired yet")
+            return
+        # Compact JSON so the Arduino's substring parser stays simple.
+        payload = json.dumps(
+            {"on": self._led["on"], "brightness": self._led["brightness"]},
+            separators=(",", ":"))
+        self._mqtt.publish(SYPIALNIA_LED_CMD_TOPIC, payload,
+                           qos=1, retain=True)
+
+    def _set_led_on(self, value):
+        self._led["on"] = bool(value)
+        self._publish_led()
+
+    def _set_led_brightness(self, value):
+        self._led["brightness"] = int(value)
+        self._publish_led()
 
     def update_co2(self, device, ppm, valid):
         """Called from the MQTT thread for each valid CO2 reading."""
@@ -213,6 +258,7 @@ def main():
     # dep disables only its own feature; the LED bridge keeps running.
     db = SensorsDB()
     co2_mqtt = CO2Mqtt(db, on_co2=lamp.update_co2)
+    lamp.set_mqtt(co2_mqtt)  # LED setters publish through this client
     co2_mqtt.start()
     start_dashboard(db)
 
