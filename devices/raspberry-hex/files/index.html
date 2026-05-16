@@ -108,14 +108,27 @@ async function loadChart() {
   const rows = await (await fetch(
     `/api/history?device=${encodeURIComponent(m.device)}` +
     `&metric=${encodeURIComponent(m.metric)}&hours=${hours}`)).json();
+  // Presence is a 0/1 event series (one row per radar edge): draw it as a
+  // sharp step, not a smoothed curve, and anchor it so an empty range reads
+  // as a flat 0 across the window instead of a blank chart.
+  const isPresence = m.metric === 'presence';
   const points = rows.map(r => ({ x: r.ts * 1000, y: r.value }));
+  if (isPresence) {
+    const now = Date.now();
+    // Lead anchor: assume "off" before the first known edge (no prior state
+    // is queried). Tail anchor: hold the last state up to now.
+    points.unshift({ x: now - Number(hours) * 3600 * 1000, y: 0 });
+    points.push({ x: now, y: rows.length ? rows[rows.length - 1].value : 0 });
+  }
   const data = {
     datasets: [{
       label: `${m.device} · ${m.metric}`,
       data: points,
       borderColor: '#4ea1ff',
       backgroundColor: 'rgba(78,161,255,.15)',
-      fill: true, pointRadius: 0, tension: .25,
+      fill: true, pointRadius: 0,
+      stepped: isPresence ? 'after' : false,
+      tension: isPresence ? 0 : .25,
     }]
   };
   const longRange = Number(hours) > 24;
@@ -132,7 +145,9 @@ async function loadChart() {
            ticks: { color:'#999', maxTicksLimit: 8, autoSkip: true,
                     callback: v => fmtTick(v) },
            grid: { color:'#262626' } },
-      y: { ticks: { color:'#999' }, grid: { color:'#262626' },
+      y: { ticks: { color:'#999', ...(isPresence ? { stepSize: 1 } : {}) },
+           ...(isPresence ? { min: 0, max: 1 } : {}),
+           grid: { color:'#262626' },
            title: { display: true, text: m.metric, color:'#999' } },
     },
     plugins: {
@@ -147,7 +162,8 @@ async function loadChart() {
   const last = rows.length ? rows[rows.length - 1] : null;
   metaEl.textContent = last
     ? `${rows.length} points · latest ${last.value} at ${new Date(last.ts*1000).toLocaleString()}`
-    : 'No data in this range.';
+    : (isPresence ? 'No presence reports in this range — showing 0.'
+                  : 'No data in this range.');
 }
 
 // Linear x-axis with hand-formatted time labels — no external date adapter,
