@@ -44,6 +44,7 @@ Sensor data flows node → hub; the LED command flows hub → node:
 | Topic | Dir | Payload |
 |-------|-----|---------|
 | `home/sypialnia/co2`     | out | `{"ppm":<int>,"valid":<bool>}` |
+| `home/sypialnia/ip`      | out | dotted IPv4 (retained) — shown on the hub dashboard device panel |
 | `home/sypialnia/status`  | out | `online` / `offline` (MQTT last-will) |
 | `home/sypialnia/led/set` | in  | `{"on":<bool>,"brightness":0..100}`, **retained** |
 

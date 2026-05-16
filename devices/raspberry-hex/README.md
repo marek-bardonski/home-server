@@ -170,21 +170,31 @@ subscribes, and the reading fans out to three places:
   Arduino subscribes and drives its outward RGB LED as a white dimmable lamp.
   Retained means the broker replays the last state to the node on every
   reconnect, so the LED survives a node reboot without HomeKit re-issuing it.
+- **Bathroom night light** — the `bathroom` AtomS3 node. `co2_mqtt.py` logs
+  every radar OUT edge (`home/bathroom/presence`) into `readings` as the
+  `presence` metric (usage history). A `Switch` service **"Bathroom Night
+  Light"** on the same HEX accessory publishes a **retained**
+  `home/bathroom/enable/set`; OFF makes the node keep the matrix dark even on
+  motion (presence is still detected and logged). Same pairing-preservation
+  rationale as the CO2 / Bedroom-LED services.
 - **Dashboard** — `dashboard.py` serves a generic time-series graph at
   `http://raspberry.local:8080/` (port from `DASHBOARD_PORT`). It lists
   whatever `(device, metric)` pairs exist, so future metrics appear with no
-  code change.
+  code change. A device panel at the top shows every node's **IP** and
+  liveness (online / stale / offline + last-seen), derived from each node's
+  retained `ip` and the 30 s status heartbeat.
 - **Storage** — `sensors_db.py` writes to a single SQLite DB at
   `/home/admin/hexled/home.db` (generic `readings`/`device_state` tables,
   MCP-friendly). It is excluded from rsync `--delete` (along with its `-wal`/
   `-shm` sidecars) so history survives deploys, the same way `hex_state.json`
   does for pairing.
 
-MQTT topics: inbound `home/<device>/<metric>` (e.g. `home/sypialnia/co2` with
-JSON `{"ppm":812,"valid":true}`) plus `home/<device>/status`
-(`online`/`offline` via the Arduino's MQTT last-will); outbound
-`home/sypialnia/led/set` (retained `{"on":<bool>,"brightness":0..100}`,
-published by the HomeKit LED setters).
+MQTT topics: inbound `home/<device>/<metric>` — `co2`
+(`{"ppm":812,"valid":true}`), `presence` (`{"present":true}`), `ip`
+(retained dotted IPv4), `status` (`online`/`offline` via the Arduino's MQTT
+last-will, refreshed by a 30 s heartbeat); outbound retained
+`home/sypialnia/led/set` (`{"on":<bool>,"brightness":0..100}`) and
+`home/bathroom/enable/set` (`{"on":<bool>}`), published by the HomeKit setters.
 
 `MQTT_HOST`, `MQTT_PORT`, `DASHBOARD_PORT` reach the service through
 `/etc/home-server.env`, which `update.sh` installs (root-only, mode 600) from

@@ -52,6 +52,13 @@ CO2_DETECT_PPM = 1000  # CarbonDioxideDetected flips above this (waku threshold)
 SYPIALNIA_LED_CMD_TOPIC = "home/sypialnia/led/set"
 SYPIALNIA_LED_NAME = "Bedroom LED"
 
+# Bathroom night-light enable, exposed as a Switch on the same accessory. ON =
+# the matrix reacts to mmWave presence; OFF = it stays dark even with motion
+# (presence is still detected and logged on the node). The setter publishes a
+# retained command, so a node reboot keeps the user's choice.
+BATHROOM_ENABLE_CMD_TOPIC = "home/bathroom/enable/set"
+BATHROOM_ENABLE_NAME = "Bathroom Night Light"
+
 YELLOW_CENTER_HUE = 60.0
 RED_CENTER_HUE = 0.0
 TINT_HALF_WIDTH = 20.0
@@ -193,6 +200,17 @@ class HexLamp(Accessory):
             "Brightness", value=self._led["brightness"],
             setter_callback=self._set_led_brightness)
 
+        # Bathroom night-light enable as a Switch on this same accessory
+        # (same pairing-preservation rationale as the services above).
+        # Default ON so the night light works out of the box; HomeKit is the
+        # source of truth, replayed to the node via the retained command.
+        self._bath_enabled = True
+        sw = self.add_preload_service("Switch", chars=["On", "Name"])
+        sw.configure_char("Name", value=BATHROOM_ENABLE_NAME)
+        self.char_bath_enable = sw.configure_char(
+            "On", value=self._bath_enabled,
+            setter_callback=self._set_bath_enable)
+
     def set_mqtt(self, mqtt):
         """Wire the MQTT publisher (CO2Mqtt) used by the LED setters. Called
         from main() after CO2Mqtt is constructed."""
@@ -208,6 +226,21 @@ class HexLamp(Accessory):
             separators=(",", ":"))
         self._mqtt.publish(SYPIALNIA_LED_CMD_TOPIC, payload,
                            qos=1, retain=True)
+
+    def _publish_bath_enable(self):
+        if self._mqtt is None:
+            log.warning("enable command dropped: MQTT publisher not wired yet")
+            return
+        payload = json.dumps({"on": self._bath_enabled},
+                             separators=(",", ":"))
+        self._mqtt.publish(BATHROOM_ENABLE_CMD_TOPIC, payload,
+                           qos=1, retain=True)
+
+    def _set_bath_enable(self, value):
+        self._bath_enabled = bool(value)
+        log.info("Bathroom night light %s",
+                 "ENABLED" if self._bath_enabled else "DISABLED")
+        self._publish_bath_enable()
 
     def _set_led_on(self, value):
         self._led["on"] = bool(value)

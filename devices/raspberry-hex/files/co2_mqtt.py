@@ -4,9 +4,15 @@ outbound control commands (e.g. the HomeKit-driven LED).
 
 Topics (home/<device>/<metric>):
     home/+/co2          JSON {"ppm": <int>, "valid": <bool>}  (in)
-    home/+/status       "online" | "offline"  (Arduino LWT)   (in)
+    home/+/presence     JSON {"present": <bool>}  (in)
+    home/+/ip           "<dotted IPv4>"  (retained)  (in)
+    home/+/status       "online" | "offline"  (Arduino LWT + heartbeat)  (in)
     home/sypialnia/led/set  JSON {"on": <bool>, "brightness": 0..100}
                             published retained by the HomeKit bridge  (out)
+
+Presence is stored generically (readings metric "presence", value 1/0), so
+each radar OUT edge becomes a timestamped row for usage tracking and shows up
+on the dashboard with no extra code.
 
 The broker runs locally on raspberry-hex, so MQTT_HOST defaults to localhost.
 paho auto-reconnects via loop_forever(), so a node or broker restart is
@@ -49,7 +55,9 @@ class CO2Mqtt(threading.Thread):
 
     def _on_connect(self, client, userdata, flags, rc):
         log.info("MQTT connected (rc=%s); subscribing", rc)
-        client.subscribe([("home/+/co2", 0), ("home/+/status", 1)])
+        client.subscribe([
+            ("home/+/co2", 0), ("home/+/presence", 1),
+            ("home/+/ip", 1), ("home/+/status", 1)])
 
     def _on_message(self, client, userdata, msg):
         parts = msg.topic.split("/")
@@ -59,7 +67,19 @@ class CO2Mqtt(threading.Thread):
         payload = msg.payload.decode("utf-8", "replace").strip()
         try:
             if metric == "status":
+                # Each status (incl. the periodic heartbeat) refreshes the
+                # row's ts, so the dashboard can tell a node went quiet.
                 self._db.set_state(device, "status", payload)
+                return
+            if metric == "ip":
+                self._db.set_state(device, "ip", payload)
+                return
+            if metric == "presence":
+                data = json.loads(payload)
+                present = bool(data.get("present", False))
+                # One timestamped row per radar OUT edge — usage history.
+                self._db.insert_reading(device, "presence", 1 if present else 0)
+                self._db.set_state(device, "presence", "on" if present else "off")
                 return
             if metric == "co2":
                 data = json.loads(payload)

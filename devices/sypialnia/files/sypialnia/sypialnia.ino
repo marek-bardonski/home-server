@@ -35,6 +35,7 @@ static const unsigned long WIFI_RETRY_INTERVAL_MS  = 5000;
 // --- MQTT topics (home/<device>/<metric>) ---
 static const char* MQTT_TOPIC_CO2     = "home/sypialnia/co2";
 static const char* MQTT_TOPIC_STATUS  = "home/sypialnia/status";
+static const char* MQTT_TOPIC_IP      = "home/sypialnia/ip";
 // Inbound LED command from the HomeKit bridge; retained, so the broker
 // replays the last state to us on every (re)connect.
 static const char* MQTT_TOPIC_LED_SET = "home/sypialnia/led/set";
@@ -133,6 +134,15 @@ bool connectToMqtt() {
 
   mqttClient.beginMessage(MQTT_TOPIC_STATUS, true);
   mqttClient.print("online");
+  mqttClient.endMessage();
+
+  // Retained IP so the hub/dashboard show every node's address (not just
+  // this one) in one place. Hand-formatted for portability across cores.
+  IPAddress ip = WiFi.localIP();
+  char ipbuf[16];
+  snprintf(ipbuf, sizeof(ipbuf), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  mqttClient.beginMessage(MQTT_TOPIC_IP, true);
+  mqttClient.print(ipbuf);
   mqttClient.endMessage();
 
   // (Re)subscribe on every (re)connect. The command is published retained,

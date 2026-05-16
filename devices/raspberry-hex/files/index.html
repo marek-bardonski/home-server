@@ -14,11 +14,16 @@
   #wrap { max-width: 960px; }
   canvas { background:#181818; border-radius:8px; padding:.5rem; }
   .meta { color:#888; font-size:.85rem; margin-top:.5rem; }
+  table.dev { border-collapse:collapse; font-size:.9rem; margin:.75rem 0 1.25rem; }
+  table.dev th, table.dev td { text-align:left; padding:.3rem .8rem .3rem 0; }
+  table.dev th { color:#888; font-weight:600; border-bottom:1px solid #333; }
+  table.dev td { color:#ddd; }
 </style>
 </head>
 <body>
 <div id="wrap">
   <h1>home-server sensors</h1>
+  <div id="devices">Loading devices…</div>
   <div class="controls">
     <label>Metric
       <select id="metric"></select>
@@ -41,7 +46,47 @@
 const metricSel = document.getElementById('metric');
 const hoursSel  = document.getElementById('hours');
 const metaEl    = document.getElementById('meta');
+const devEl     = document.getElementById('devices');
 let chart;
+
+// Per-device liveness + IP, from device_state (status/ip/presence) plus the
+// freshest reading. "online" requires a recent heartbeat; a node that went
+// quiet shows "stale" even if its retained status is still "online".
+const ALIVE_WINDOW_S = 120;
+async function loadDevices() {
+  let d;
+  try { d = await (await fetch('/api/latest')).json(); }
+  catch (e) { devEl.textContent = 'Devices: dashboard offline.'; return; }
+  const now = Date.now() / 1000;
+  const dev = {};
+  const touch = (name, ts) => {
+    dev[name] = dev[name] || { last: 0 };
+    if (ts > dev[name].last) dev[name].last = ts;
+  };
+  for (const r of d.readings || []) touch(r.device, r.ts);
+  for (const s of d.state || []) {
+    dev[s.device] = dev[s.device] || { last: 0 };
+    dev[s.device][s.key] = s.value;
+    if (s.ts > dev[s.device].last) dev[s.device].last = s.ts;
+  }
+  const names = Object.keys(dev).sort();
+  if (!names.length) { devEl.textContent = 'No devices reporting yet.'; return; }
+  const rows = names.map(n => {
+    const o = dev[n], age = now - (o.last || 0);
+    let st;
+    if (o.status === 'offline') st = '<span style="color:#e66">offline</span>';
+    else if (age <= ALIVE_WINDOW_S) st = '<span style="color:#5c6">online</span>';
+    else st = '<span style="color:#dc3">stale</span>';
+    const ago = o.last ? Math.round(age) + 's ago' : '—';
+    const pres = o.presence ? ' · presence ' + o.presence : '';
+    return `<tr><td>${n}</td><td>${st}</td><td>${o.ip || '—'}</td>` +
+           `<td>${ago}${pres}</td></tr>`;
+  });
+  devEl.innerHTML =
+    '<table class="dev"><thead><tr><th>device</th><th>state</th>' +
+    '<th>IP</th><th>last seen</th></tr></thead><tbody>' +
+    rows.join('') + '</tbody></table>';
+}
 
 async function loadMetrics() {
   const list = await (await fetch('/api/metrics')).json();
@@ -107,7 +152,11 @@ async function loadChart() {
 
 // Linear x-axis with hand-formatted time labels — no external date adapter,
 // so the time axis (and Refresh) work even if the box has no internet.
-async function refreshAll() { await loadMetrics(); await loadChart(); }
+async function refreshAll() {
+  await loadDevices();
+  await loadMetrics();
+  await loadChart();
+}
 
 metricSel.onchange = loadChart;
 hoursSel.onchange = loadChart;

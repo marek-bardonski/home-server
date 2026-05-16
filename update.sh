@@ -53,7 +53,7 @@ update_device() {
     fi
 
     SSH_TARGET=""; REMOTE_DIR=""; VENV_PYTHON=""; ENTRYPOINT=""; RUN_AS_ROOT="false"; SCREEN_NAME=""; SYSTEMD_UNIT=""
-    ARDUINO_FQBN=""; ARDUINO_OTA_ADDRESS=""; ARDUINO_SKETCH=""
+    ARDUINO_FQBN=""; ARDUINO_OTA_ADDRESS=""; ARDUINO_SKETCH=""; ARDUINO_USB_MATCH=""
     # shellcheck disable=SC1090
     . "$conf"
 
@@ -91,7 +91,15 @@ update_device() {
         # Match the FQBN on a serial line of `board list`; the same board on
         # Wi-Fi shows up with protocol "network", so USB always wins when both
         # are present. $1=Port, $2=Protocol (Port never contains spaces).
-        usb_port="$(arduino-cli board list 2>/dev/null | awk -v fqbn="$ARDUINO_FQBN" '$0 ~ fqbn && $2 == "serial" { print $1; exit }')"
+        # The FQBN must be exact for compile/upload, but ESP32-S3 native USB
+        # reports a generic FQBN (e.g. esp32:esp32:esp32_family) in `board
+        # list`, never the board-specific one — so detecting the wired board
+        # by the exact FQBN string fails. ARDUINO_USB_MATCH (device.conf) is
+        # an optional looser substring (e.g. "esp32:esp32") used only for
+        # serial-port detection; it defaults to the exact FQBN, so existing
+        # devices (sypialnia) are unaffected.
+        usb_match="${ARDUINO_USB_MATCH:-$ARDUINO_FQBN}"
+        usb_port="$(arduino-cli board list 2>/dev/null | awk -v m="$usb_match" '$0 ~ m && $2 == "serial" { print $1; exit }')"
         if [ -n "$usb_port" ]; then
             echo "  Mode:      arduino-usb ($ARDUINO_FQBN @ $usb_port)"
         else
@@ -123,33 +131,55 @@ EOF
             arduino-cli upload -p "$usb_port" --fqbn "$ARDUINO_FQBN" \
                 --input-dir "$build_dir" "$sketch_dir" || rc=$?
         elif [ "$rc" -eq 0 ]; then
-            # Network/OTA: invoke the arduinoOTA tool directly.
-            # `arduino-cli upload -p <ip>` refuses with "No device found"
-            # unless the board is mDNS-discoverable, and this R4 advertises
-            # no discoverable _arduino._tcp service (not in `board list`,
-            # avahi can't see it). The tool itself only needs IP + port +
-            # password — exactly what arduino-cli would have run, minus its
-            # discovery gate. The arm64 binary + `-t 60` patch are set up
-            # per devices/sypialnia/README.md "OTA caveats".
-            ota_bin=""
-            for d in "$(arduino-cli config get directories.data 2>/dev/null || true)" \
-                     "$HOME/Library/Arduino15" "$HOME/.arduino15"; do
-                [ -n "$d" ] || continue
-                cand="$(ls -1 "$d"/packages/arduino/tools/arduinoOTA/*/bin/arduinoOTA 2>/dev/null | sort | tail -1)"
-                [ -n "$cand" ] && { ota_bin="$cand"; break; }
-            done
+            # Network/OTA. Both paths invoke the OTA tool directly: `arduino-cli
+            # upload -p <ip>` refuses unless the board is mDNS-discoverable, and
+            # the tool itself only needs IP + password — exactly what
+            # arduino-cli would run, minus its discovery gate.
             sketch_bin="$(ls -1 "$build_dir"/*.ino.bin 2>/dev/null | grep -v with_bootloader | head -1)"
-            if [ -z "$ota_bin" ] || [ ! -x "$ota_bin" ]; then
-                echo "  ERROR: arduinoOTA tool not found under the arduino-cli data dir" >&2
-                rc=1
-            elif [ -z "$sketch_bin" ]; then
+            if [ -z "$sketch_bin" ]; then
                 echo "  ERROR: compiled .ino.bin not found in $build_dir" >&2
                 rc=1
+            elif [ -z "$ARDUINO_OTA_ADDRESS" ] || [ "$ARDUINO_OTA_ADDRESS" = "0.0.0.0" ]; then
+                echo "  ERROR: no USB board and ARDUINO_OTA_ADDRESS unset/placeholder" >&2
+                echo "         (read the board IP off the dashboard or serial, set it in device.conf)" >&2
+                rc=1
+            elif [ "${ARDUINO_FQBN%%:*}" = "esp32" ]; then
+                # ESP32: the esp32 core's espota.py over port 3232.
+                espota=""
+                for d in "$(arduino-cli config get directories.data 2>/dev/null || true)" \
+                         "$HOME/Library/Arduino15" "$HOME/.arduino15"; do
+                    [ -n "$d" ] || continue
+                    cand="$(ls -1 "$d"/packages/esp32/hardware/esp32/*/tools/espota.py 2>/dev/null | sort | tail -1)"
+                    [ -n "$cand" ] && { espota="$cand"; break; }
+                done
+                if [ -z "$espota" ]; then
+                    echo "  ERROR: espota.py not found under the esp32 core" >&2
+                    rc=1
+                else
+                    echo "  -> espota.py (network) to $ARDUINO_OTA_ADDRESS:3232"
+                    python3 "$espota" -i "$ARDUINO_OTA_ADDRESS" -p 3232 \
+                        -a "$SECRET_OTA_PASS" -f "$sketch_bin" -r || rc=$?
+                fi
             else
-                echo "  -> arduinoOTA (network) to $ARDUINO_OTA_ADDRESS:65280"
-                "$ota_bin" -address "$ARDUINO_OTA_ADDRESS" -port 65280 \
-                    -username arduino -password "$SECRET_OTA_PASS" \
-                    -sketch "$sketch_bin" -upload /sketch -b -t 60 || rc=$?
+                # Renesas (Arduino UNO R4): the bundled arduinoOTA tool on
+                # :65280. arm64 binary + `-t 60` patch per
+                # devices/sypialnia/README.md "OTA caveats".
+                ota_bin=""
+                for d in "$(arduino-cli config get directories.data 2>/dev/null || true)" \
+                         "$HOME/Library/Arduino15" "$HOME/.arduino15"; do
+                    [ -n "$d" ] || continue
+                    cand="$(ls -1 "$d"/packages/arduino/tools/arduinoOTA/*/bin/arduinoOTA 2>/dev/null | sort | tail -1)"
+                    [ -n "$cand" ] && { ota_bin="$cand"; break; }
+                done
+                if [ -z "$ota_bin" ] || [ ! -x "$ota_bin" ]; then
+                    echo "  ERROR: arduinoOTA tool not found under the arduino-cli data dir" >&2
+                    rc=1
+                else
+                    echo "  -> arduinoOTA (network) to $ARDUINO_OTA_ADDRESS:65280"
+                    "$ota_bin" -address "$ARDUINO_OTA_ADDRESS" -port 65280 \
+                        -username arduino -password "$SECRET_OTA_PASS" \
+                        -sketch "$sketch_bin" -upload /sketch -b -t 60 || rc=$?
+                fi
             fi
         fi
         rm -f "$secrets_h"
