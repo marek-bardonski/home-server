@@ -108,17 +108,28 @@ async function loadChart() {
   const rows = await (await fetch(
     `/api/history?device=${encodeURIComponent(m.device)}` +
     `&metric=${encodeURIComponent(m.metric)}&hours=${hours}`)).json();
-  // Presence is a 0/1 event series (one row per radar edge): draw it as a
-  // sharp step, not a smoothed curve, and anchor it so an empty range reads
-  // as a flat 0 across the window instead of a blank chart.
+  // Presence is a 0/1 sample-and-hold series: each row is a radar edge and
+  // the value holds until the next edge. We don't use Chart.js's `stepped`
+  // mode — its before/after interpretation rendered an idle gap at the
+  // *next* edge's value (a false multi-hour "present" overnight). Instead we
+  // expand it into an explicit square wave: at every edge emit the held
+  // value, then the new one. A lead anchor assumes "off" before the first
+  // known edge (no prior state is queried) and a tail anchor holds the last
+  // state up to now, so an empty range reads as a flat 0 across the window.
   const isPresence = m.metric === 'presence';
-  const points = rows.map(r => ({ x: r.ts * 1000, y: r.value }));
+  let points;
   if (isPresence) {
     const now = Date.now();
-    // Lead anchor: assume "off" before the first known edge (no prior state
-    // is queried). Tail anchor: hold the last state up to now.
-    points.unshift({ x: now - Number(hours) * 3600 * 1000, y: 0 });
-    points.push({ x: now, y: rows.length ? rows[rows.length - 1].value : 0 });
+    points = [{ x: now - Number(hours) * 3600 * 1000, y: 0 }];
+    let prevY = 0;
+    for (const r of rows) {
+      const x = r.ts * 1000;
+      points.push({ x, y: prevY }, { x, y: r.value });
+      prevY = r.value;
+    }
+    points.push({ x: now, y: prevY });
+  } else {
+    points = rows.map(r => ({ x: r.ts * 1000, y: r.value }));
   }
   const data = {
     datasets: [{
@@ -127,7 +138,7 @@ async function loadChart() {
       borderColor: '#4ea1ff',
       backgroundColor: 'rgba(78,161,255,.15)',
       fill: true, pointRadius: 0,
-      stepped: isPresence ? 'after' : false,
+      stepped: false,
       tension: isPresence ? 0 : .25,
     }]
   };
